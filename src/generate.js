@@ -28,11 +28,11 @@ export const GEN = {
 };
 
 const CATEGORIES = [
-  { id: 'closet', weight: 14, w: [3.5, 4.5],  d: [3.0, 4.2],   props: [0, 1], lightScale: 0.5 },
-  { id: 'small',  weight: 30, w: [5.0, 6.5],  d: [4.5, 6.0],   props: [1, 3], lightScale: 0.9 },
-  { id: 'medium', weight: 28, w: [7.0, 9.0],  d: [6.5, 8.5],   props: [2, 5], lightScale: 1.0 },
-  { id: 'large',  weight: 20, w: [9.5, 12.0], d: [8.5, 10.5],  props: [4, 8], lightScale: 1.2 },
-  { id: 'hall',   weight:  8, w: [12.0, 12.8],d: [10.4, 10.8], props: [5, 10],lightScale: 1.4 },
+  { id: 'closet', weight: 14, w: [3.5, 4.5],  d: [3.0, 4.2],   props: [1, 3],  lightScale: 0.5 },
+  { id: 'small',  weight: 30, w: [5.0, 6.5],  d: [4.5, 6.0],   props: [3, 6],  lightScale: 0.9 },
+  { id: 'medium', weight: 28, w: [7.0, 9.0],  d: [6.5, 8.5],   props: [5, 10], lightScale: 1.0 },
+  { id: 'large',  weight: 20, w: [9.5, 12.0], d: [8.5, 10.5],  props: [8, 15], lightScale: 1.2 },
+  { id: 'hall',   weight:  8, w: [12.0, 12.8],d: [10.4, 10.8], props: [11, 19],lightScale: 1.4 },
 ];
 
 const WARM = [0xffb066, 0xffa040, 0xff8c3a, 0xffc890];
@@ -315,6 +315,22 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
     // Props now avoid each other as well as the doorway spines. They used to
     // be placed independently, so two could occupy the same square metre.
     const here = [];
+
+    // Stacks go down FIRST. They are the only cover in the house that is not a
+    // wall, they need a clear couple of metres, and if the furniture is placed
+    // first there is never anywhere left to put them.
+    const area = (r.x1 - r.x0) * (r.z1 - r.z0);
+    if (area > 42 && rand() < 0.6) {
+      const spot = quadrantSpot(r, rand, 1.7, here);
+      if (spot) {
+        const stack = rand() < 0.5
+          ? pyramidStack(spot.x, spot.z, r.id, rand)
+          : ringStack(spot.x, spot.z, r.id, rand);
+        props.push(...stack);
+        here.push(...stack);
+      }
+    }
+
     for (let k = 0; k < n; k++) {
       const p = placeFurniture(r, rand, here);
       if (!p) continue;
@@ -668,6 +684,97 @@ const FURNITURE_TINT = {
   rug: 0x4a2620, bed: 0x2c2119, shelf: 0x2a1f14, cabinet: 0x30241a,
   painting: 0x5a4326,
 };
+
+/**
+ * A clear spot away from the centre.
+ *
+ * tryPlaceProp keeps a wide object clear of the doorway spine in BOTH axes,
+ * which for anything over about three metres leaves no legal position in any
+ * room smaller than a great hall — that is why no stack was ever placed.
+ * Aiming at a quadrant instead puts it off the spine by construction and only
+ * has to clear the walls and whatever is already there.
+ */
+function quadrantSpot(r, rand, half, obstacles) {
+  const cx = r.plot ? r.plot.cx : mid(r.x0, r.x1);
+  const cz = r.plot ? r.plot.cz : mid(r.z0, r.z1);
+  const cw = GEN.corridorWidth;
+  const corners = shuffleCopy([[-1, -1], [1, -1], [-1, 1], [1, 1]], rand);
+
+  for (const [sx, sz] of corners) {
+    for (const pull of [0.66, 0.78, 0.55]) {
+      const x = cx + sx * (r.x1 - r.x0) / 2 * pull;
+      const z = cz + sz * (r.z1 - r.z0) / 2 * pull;
+      if (x < r.x0 + half + 0.3 || x > r.x1 - half - 0.3) continue;
+      if (z < r.z0 + half + 0.3 || z > r.z1 - half - 0.3) continue;
+      if (Math.abs(x - cx) < cw / 2 + half * 0.7) continue;
+      if (Math.abs(z - cz) < cw / 2 + half * 0.7) continue;
+      if (obstacles.some((o) => overlaps(x, z, half, o))) continue;
+      return { x, z };
+    }
+  }
+  return null;
+}
+
+function shuffleCopy(arr, rand) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = (rand() * (i + 1)) | 0;
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/**
+ * Crates stacked three-two-one. Tall enough to stand behind, and the top box
+ * sits above eye level so it breaks line of sight rather than just tripping
+ * you up.
+ */
+function pyramidStack(cx, cz, roomId, rand) {
+  const s = 0.62;
+  const out = [];
+  const rows = [[-1, 0, 1], [-0.5, 0.5], [0]];
+  rows.forEach((row, level) => {
+    for (const off of row) {
+      out.push({
+        room: roomId, kind: 'crate',
+        x: cx + off * s * 1.04,
+        z: cz + (rand() - 0.5) * 0.12,
+        y: level * s,
+        w: s, d: s, h: s,
+        facing: (rand() - 0.5) * 0.35,
+        noCollide: false,
+        color: shade(0x3a2c1c, rand, 0.22),
+      });
+    }
+  });
+  return out;
+}
+
+/** A ring of crates with a way through: cover you can play a circle around. */
+function ringStack(cx, cz, roomId, rand) {
+  const s = 0.6;
+  const radius = 1.25;
+  const gap = (rand() * 6) | 0;          // one side is always open
+  const out = [];
+  for (let i = 0; i < 6; i++) {
+    if (i === gap) continue;
+    const a = (i / 6) * Math.PI * 2;
+    const stacked = rand() < 0.55 ? 2 : 1;
+    for (let k = 0; k < stacked; k++) {
+      out.push({
+        room: roomId, kind: 'crate',
+        x: cx + Math.cos(a) * radius,
+        z: cz + Math.sin(a) * radius,
+        y: k * s,
+        w: s, d: s, h: s,
+        facing: a,
+        noCollide: false,
+        color: shade(0x3a2c1c, rand, 0.22),
+      });
+    }
+  }
+  return out;
+}
 
 function placeFurniture(r, rand, obstacles) {
   const cat = pickWeighted(FURNITURE, rand);

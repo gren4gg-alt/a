@@ -25,6 +25,8 @@ export class Voice {
     this.pushToTalk = true;
     this.talking = false;
     this.denied = false;
+    /** Peers we could not establish audio with. Voice only; nothing else. */
+    this.failed = new Set();
     this.peers = new Map();       // peerId -> { call, panner, gain, el, source }
     this.onStatus = null;
 
@@ -159,9 +161,28 @@ export class Voice {
   }
 
   _attach(peerId, call) {
-    call.on('stream', (remote) => this._connectStream(peerId, call, remote));
-    call.on('close', () => this.drop(peerId));
-    call.on('error', () => this.drop(peerId));
+    // A pair that cannot complete its own handshake — a strict NAT, a corporate
+    // firewall — is normal and must stay contained. Game state goes through the
+    // host, so only this one link is lost; everything else keeps working, and
+    // the pair is reported rather than silently missing.
+    const timer = setTimeout(() => {
+      if (!this.peers.has(peerId)) {
+        this.failed.add(peerId);
+        this.onStatus?.('peerfail');
+      }
+    }, 12000);
+    call.on('stream', (remote) => {
+      clearTimeout(timer);
+      this.failed.delete(peerId);
+      this._connectStream(peerId, call, remote);
+    });
+    call.on('close', () => { clearTimeout(timer); this.drop(peerId); });
+    call.on('error', () => {
+      clearTimeout(timer);
+      this.failed.add(peerId);
+      this.onStatus?.('peerfail');
+      this.drop(peerId);
+    });
   }
 
   _connectStream(peerId, call, remote) {
@@ -241,7 +262,13 @@ export class Voice {
     if (p) p.gain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.15);
   }
 
+  /** How many people you can hear, and how many you cannot. */
+  get linkReport() {
+    return { connected: this.peers.size, failed: this.failed.size };
+  }
+
   drop(peerId) {
+    this.failed.delete(peerId);
     const p = this.peers.get(peerId);
     if (!p) return;
     try { p.source.disconnect(); p.panner.disconnect(); p.gain.disconnect(); } catch { /* already torn down */ }

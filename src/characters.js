@@ -4,6 +4,7 @@
 // Every ability hooks something the game already simulates, rather than adding
 // a parallel system:
 //
+//   overload -> the ghost's own stun timer, in a radius
 //   flare    -> the house shader's second light slot, plus ghost.lastSeen
 //   sprint   -> the player's speed constants
 //   stillness-> the ghost's hearing and sight checks
@@ -101,11 +102,25 @@ export const CHARACTERS = [
     cooldown: 55,
     stats: { braces: 1, bleedScale: 1.5 },
   },
+  {
+    id: 'terminator',
+    price: 3200,
+    name: 'The Terminator',
+    tag: 'Stops them where they stand',
+    color: 0xff6a4d,
+    accent: 0x9c2a18,
+    silhouette: 'armoured',
+    passive: 'You run 5% faster, and a knife thrown at you often goes wide.',
+    ability: 'Overload',
+    abilityText: 'Everything within twelve metres drops where it stands for ten seconds. Two minutes before you can do it again.',
+    cooldown: 120,
+    stats: { sprintScale: 1.05, knifeDodge: 0.45 },
+  },
 ];
 
 // The Lamplighter is free forever: there has to be someone to play as before
 // anyone has earned anything, and a torch that reaches further is the least
-// situational of the six.
+// situational of the seven.
 export const DEFAULT_CHARACTER = CHARACTERS[0].id;
 
 export function characterById(id) {
@@ -153,6 +168,7 @@ export class Loadout {
 }
 
 export const ABILITY_DURATION = {
+  terminator: 10,
   lamplighter: 20,
   runner: 4,
   nurse: 0,
@@ -170,5 +186,8 @@ function defaultStats() {
     bleedScale: 1.0,
     lootSense: 0,
     braces: 0,
+    // Chance a knife that would have hit goes wide instead. Rolled on the
+    // host, so it cannot be re-rolled by the client it is about to hit.
+    knifeDodge: 0,
   };
 }

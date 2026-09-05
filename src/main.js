@@ -16,7 +16,7 @@ import { Ghost } from './enemy.js';
 import { loadSurfaceTextures } from './textures.js';
 import { loadModels } from './models.js';
 import { Interactables } from './interact.js';
-import { instanceScaled, has as hasModel } from './models.js';
+import { instance as modelInstance, fitInfo, has as hasModel } from './models.js';
 import { startMinigame, GAME_NAMES } from './minigames.js';
 import { ceilingColliders, roomVariant } from './build.js';
 import { MenuScene } from './menuscene.js';
@@ -478,12 +478,24 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
   let modelled = 0;
   for (const p of level.props) {
     if (!hasModel(p.kind)) continue;
-    const obj = instanceScaled(p.kind, p.h);
+    const obj = modelInstance(p.kind);
     if (!obj) continue;
+    if (p.fitScale) obj.scale.setScalar(p.fitScale);
     obj.position.set(p.x, p.y ?? 0, p.z);
     obj.rotation.y = p.facing;
     roomMeshes.get(p.room)?.add(obj);
     modelled++;
+  }
+
+  // Match every prop's footprint to the model that will actually stand there,
+  // BEFORE the colliders are built from it. Supplied models come at all sorts
+  // of proportions; scaling only by height leaves a wide chair sticking out of
+  // its collider and a squat crate with a metre of solid air on top.
+  for (const pr of level.props) {
+    if (!hasModel(pr.kind)) continue;
+    const f = fitInfo(pr.kind, pr.w, pr.h, pr.d);
+    if (!f) continue;
+    pr.w = f.w; pr.h = f.h; pr.d = f.d; pr.fitScale = f.k;
   }
 
   const interact = new Interactables(scene, level);
@@ -554,11 +566,14 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
   player.name = session.name;
   player.speedScale = loadout.stats.sprintScale;
   player.loudness = loadout.stats.loudnessScale;
+  player.knifeDodge = loadout.stats.knifeDodge;
   player.bindInput(canvas);
   player.onFlashToggle = () => {
     material.uniforms.uFlashOn.value = material.uniforms.uFlashOn.value > 0.5 ? 0 : 1;
   };
   player.onDebugToggle = () => el.stats.classList.toggle('on');
+  player.onFullscreen = () => toggleFullscreen();
+  player.onCursor = () => toggleCursor();
   player.onPower = () => firePower();
   player.onInteract = () => useNearest();
   if (TOUCH) {
@@ -585,9 +600,10 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
   const loadouts = new Map([[session.localId, loadout]]);
   for (const p of session.roster) {
     if (p.id === session.localId) continue;
-    const r = new RemotePlayer(scene, p.id, p.name, rosterIndex(p.id), !isHost());
+    const r = new RemotePlayer(scene, p.id, p.name, rosterIndex(p.id), !isHost(), p.char);
     const lo = new Loadout(characterById(p.char ?? DEFAULT_CHARACTER));
     r.loudness = lo.stats.loudnessScale;
+    r.knifeDodge = lo.stats.knifeDodge;
     remotes.set(p.id, r);
     loadouts.set(p.id, lo);
   }
@@ -609,6 +625,7 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
       }
     };
     g.onHit = (playerId) => hostKnockDown(playerId);
+    g.onDodge = (playerId) => { if (playerId === session.localId) audio.knifeThrow(2); };
     g.onTrap = (x, z) => {
       addTrap(x, z);
       if (isHost() && isNet()) session.net.broadcast(MSG.TRAP, { n: 'add', x: r2(x), z: r2(z) }, true);
@@ -625,6 +642,7 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     carrying: null, minigame: null, busyTerminals: new Map(), useTarget: null,
     sheltered: null,
     boardOpen: null, boardEditor: null, adRevives: 0, vote: null,
+    stateSeq: 0, snapSeq: 0, lastSnapSeq: -1,
     exitBead, flare, flareUntil: 0, senseUntil: 0,
     trapMat, trapGeo, trapGroup, traps: [],
     carried: [], elapsed: 0, over: false, begun: !isNet(),
@@ -666,7 +684,8 @@ function promptText() {
   const k = (id) => `<b>${keyLabel(b[id])}</b>`;
   return `${k('forward')}${k('left')}${k('back')}${k('right')} move · ${k('sprint')} run · ${k('crouch')} crouch<br>` +
     `${k('flashlight')} torch · ${k('power')} ability · ${k('interact')} pick someone up<br>` +
-    `${k('talk')} talk · ${k('stats')} stats · <b>Esc</b> free the cursor<br>` +
+    `${k('talk')} talk · ${k('cursor')} free the mouse · ${k('fullscreen')} fullscreen<br>` +
+    `${k('stats')} stats · <b>Esc</b> also releases the mouse<br>` +
     `<span style="opacity:0.7">Crawl holes are too low for it to follow you through.</span>`;
 }
 
@@ -782,6 +801,19 @@ function applyPower(charId, x, z, ownerId) {
     case 'scavenger':
       if (mine) run.senseUntil = run.time + ABILITY_DURATION.scavenger;
       break;
+    case 'terminator': {
+      // Everything nearby, not just whatever was chasing the owner: the point
+      // is to break a room open for the whole group.
+      if (isHost()) {
+        for (const g of run.ghosts) {
+          if (Math.hypot(g.pos.x - x, g.pos.z - z) < 12.0) {
+            g.shove(ABILITY_DURATION.terminator, x, z);
+          }
+        }
+      }
+      audio.hit();
+      break;
+    }
     case 'warden': {
       if (isHost()) {
         // Shoves whichever is within reach, not all of them.
@@ -1734,7 +1766,11 @@ function network(dt) {
   if (!isHost() && run.sendAcc >= 1 / SEND_HZ) {
     run.sendAcc = 0;
     const p = run.player;
+    // Unreliable means unordered. Without a sequence number an older packet
+    // arriving after a newer one is treated as the latest word and snaps
+    // everyone backwards.
     net.toHost(MSG.STATE, {
+      q: ++run.stateSeq,
       x: r2(p.pos.x), z: r2(p.pos.z), y: r2(p.yaw),
       f: (p.downed ? 1 : 0) | (p.dead ? 2 : 0) | (p.crouching ? 4 : 0),
       v: Math.round((p.voiceLevel ?? 0) * 100),
@@ -1749,6 +1785,7 @@ function network(dt) {
       (pl.downed ? 1 : 0) | (pl.dead ? 2 : 0) | (pl.crouching ? 4 : 0),
     ]);
     net.broadcast(MSG.SNAP, {
+      q: ++run.snapSeq,
       p: players,
       g: run.ghosts.map((gh) => [
         r2(gh.pos.x), r2(gh.pos.z), r2(gh.mesh.rotation.y), r2(gh.rage), gh.state,
@@ -1772,6 +1809,30 @@ function network(dt) {
 // ---------------------------------------------------------------------------
 
 function wireNet(net) {
+  /**
+   * Sender-role guards.
+   *
+   * PeerJS ids are visible in the lobby, so "who sent this" has to be checked
+   * on every message rather than assumed from the message type. Two rules:
+   * a client accepts nothing that did not come from the host, and a host
+   * ignores anything only it is supposed to send. Without the first, a client
+   * that rewrote its own roster from a forged LOBBY would be trivial.
+   */
+  const fromHost = (fn) => (d, from) => {
+    if (isHost() || !net.isFromHost(from)) return;
+    fn(d, from);
+  };
+  const fromClient = (fn) => (d, from) => {
+    if (!isHost() || from === net.id) return;
+    fn(d, from);
+  };
+  // Both directions carry these; each branches on isHost() internally, but a
+  // client must still only ever hear them from the host.
+  const authed = (fn) => (d, from) => {
+    if (!isHost() && !net.isFromHost(from)) return;
+    fn(d, from);
+  };
+
   // Every refusal happens here, before the connection is wired up, so a
   // rejected peer never enters the roster or receives a snapshot.
   net.gate = (conn) => {
@@ -1820,7 +1881,7 @@ function wireNet(net) {
     broadcastLobby();
   });
 
-  net.on(MSG.DENY, (d) => {
+  net.on(MSG.DENY, fromHost((d) => {
     voice.shutdown();
     session.net?.destroy();
     session.net = null;
@@ -1832,7 +1893,7 @@ function wireNet(net) {
     showMenuError(d?.kicked
       ? (d.why ?? 'The host removed you from the room.')
       : (d?.why ?? 'The host would not let you in.'));
-  });
+  }));
 
   net.on('left', ({ id }) => {
     voice.drop(id);
@@ -1848,7 +1909,7 @@ function wireNet(net) {
     if (currentScreen === 'select') renderSelect();
   });
 
-  net.on(MSG.HELLO, ({ name }, from) => {
+  net.on(MSG.HELLO, fromClient(({ name }, from) => {
     if (!isHost()) return;
     if (roomLocked) return;
     const entry = session.roster.find((p) => p.id === from);
@@ -1857,46 +1918,56 @@ function wireNet(net) {
       session.roster.push({ id: from, name: cleanName(name), ready: false, char: DEFAULT_CHARACTER });
     }
     broadcastLobby();
-  });
+  }));
 
-  net.on(MSG.LOBBY, ({ roster, difficultyId }) => {
+  net.on(MSG.LOBBY, fromHost(({ roster, difficultyId }) => {
     session.roster = roster;
     session.difficultyId = difficultyId;
     const me = meInRoster();
     if (me) { session.character = me.char ?? session.character; session.ready = !!me.ready; }
     if (currentScreen === 'select' || currentScreen === 'multiplayer') renderSelect();
     voice.callAll(net.peer, roster.map((p) => p.id).filter((id) => id !== net.id));
-  });
+  }));
 
-  net.on(MSG.CHAR, ({ char, ready }, from) => {
+  net.on(MSG.CHAR, fromClient(({ char, ready }, from) => {
     if (!isHost()) return;
     const entry = session.roster.find((p) => p.id === from);
     if (!entry) return;
     if (char) entry.char = char;
     if (ready !== undefined) entry.ready = ready;
     broadcastLobby();
-  });
+  }));
 
-  net.on(MSG.START, ({ difficultyId, seed }) => {
+  net.on(MSG.START, fromHost(({ difficultyId, seed }) => {
     if (isHost()) return;
+    // START is re-sent to stragglers, so ignore it if this house is already up.
+    if (run && run.level.seed === seed) return;
     startRun(difficultyById(difficultyId), seed);
-  });
+  }));
 
-  net.on(MSG.LOADED, (_, from) => { if (isHost()) hostMarkLoaded(from); });
-  net.on(MSG.BEGIN, () => { if (run) run.begun = true; });
+  net.on(MSG.LOADED, fromClient((_, from) => hostMarkLoaded(from)));
+  net.on(MSG.BEGIN, fromHost(() => { if (run) run.begun = true; }));
 
-  net.on(MSG.STATE, (d, from) => {
+  net.on(MSG.STATE, fromClient((d, from) => {
     if (!isHost() || !run) return;
     const rp = run.remotes.get(from);
     if (!rp) return;
+    if (d.q !== undefined) {
+      if (d.q <= (rp.lastStateSeq ?? -1)) return;    // arrived out of order
+      rp.lastStateSeq = d.q;
+    }
     rp.push(d.x, d.z, d.y, !!(d.f & 1), !!(d.f & 2), performance.now(), !!(d.f & 4));
     // Applied directly rather than buffered: the ghost reacts to how loud you
     // are now, and an eighth of a second of smoothing would only blur it.
     rp.voiceLevel = (d.v ?? 0) / 100;
-  });
+  }));
 
-  net.on(MSG.SNAP, (d) => {
+  net.on(MSG.SNAP, fromHost((d) => {
     if (isHost() || !run) return;
+    if (d.q !== undefined) {
+      if (d.q <= run.lastSnapSeq) return;            // arrived out of order
+      run.lastSnapSeq = d.q;
+    }
     const now = performance.now();
     for (const [idx, x, z, yaw, f] of d.p) {
       const entry = session.roster[idx];
@@ -1909,20 +1980,20 @@ function wireNet(net) {
     }
     run.elapsed = d.e;
     run.atExit = d.a;
-  });
+  }));
 
-  net.on(MSG.KNIFE, (d) => {
+  net.on(MSG.KNIFE, fromHost((d) => {
     if (isHost() || !run) return;
     (run.ghosts[d.gi ?? 0] ?? run.ghosts[0])?.addKnife(d.x, d.z, d.dx, d.dz);
-  });
+  }));
 
-  net.on(MSG.HIDE, (d, from) => {
+  net.on(MSG.HIDE, authed((d, from) => {
     if (!run) return;
     if (isHost()) { hostSetHide(d.c, d.on ? from : null); return; }
     applyHide(d.c, d.i === null || d.i === undefined ? null : session.roster[d.i]?.id ?? null);
-  });
+  }));
 
-  net.on(MSG.RELIC, (d, from) => {
+  net.on(MSG.RELIC, authed((d, from) => {
     if (!run) return;
     if (d.n === 'busy') {
       run.interact.setTerminalBusy(d.id, d.on);
@@ -1936,9 +2007,9 @@ function wireNet(net) {
     }
     if (isHost()) { hostRelic(d.n, d.id, from); return; }
     applyRelic(d.n, d.id, session.roster[d.i]?.id, d.slot);
-  });
+  }));
 
-  net.on(MSG.VOTE, (d, from) => {
+  net.on(MSG.VOTE, authed((d, from) => {
     if (!run) return;
     if (isHost()) {
       if (d.n === 'yes') hostRecordVote(from);
@@ -1952,31 +2023,31 @@ function wireNet(net) {
       renderVote();
     } else if (d.n === 'go') { run.vote = null; applyGroupRevive(); }
     else if (d.n === 'end') { run.vote = null; el.vote.classList.add('hidden'); }
-  });
+  }));
 
-  net.on(MSG.BOARD, (d, from) => {
+  net.on(MSG.BOARD, authed((d, from) => {
     if (!run) return;
     run.interact.applyBoardStroke(d.b, d.s);
     // The host relays so a client's chalk reaches everyone, not only the host.
     if (isHost()) session.net.broadcast(MSG.BOARD, d, true, from);
     if (run.boardOpen === d.b) run.boardEditor?.refresh();
-  });
+  }));
 
-  net.on(MSG.TRAP, (d) => {
+  net.on(MSG.TRAP, fromHost((d) => {
     if (isHost() || !run) return;
     if (d.n === 'add') { addTrap(d.x, d.z); return; }
     applyTrapHit(d.i, session.roster[d.p]?.id);
-  });
+  }));
 
-  net.on(MSG.POWER, (d, from) => {
+  net.on(MSG.POWER, authed((d, from) => {
     if (!run) return;
     const ownerId = session.roster[d.i]?.id ?? from;
     if (ownerId === session.localId) return;   // already applied locally
     applyPower(d.c, d.x, d.z, ownerId);
     if (isHost()) session.net.broadcast(MSG.POWER, d, true, from);
-  });
+  }));
 
-  net.on(MSG.PICKUP, (d, from) => {
+  net.on(MSG.PICKUP, authed((d, from) => {
     if (!run) return;
     if (isHost()) { hostGrantLoot(d.uid, from); return; }
     const l = run.lootItems.find((x) => x.uid === d.uid);
@@ -1985,9 +2056,9 @@ function wireNet(net) {
     l.mesh.visible = false;
     l.bead.visible = false;
     if (session.roster[d.i]?.id === session.localId) claimLoot(l);
-  });
+  }));
 
-  net.on(MSG.DOWN, (d) => {
+  net.on(MSG.DOWN, fromHost((d) => {
     if (isHost() || !run) return;
     if (d.brace) { audio.hit(); return; }
     const id = session.roster[d.i]?.id;
@@ -1996,9 +2067,9 @@ function wireNet(net) {
     if (target) { target.downed = !d.dead; target.dead = d.dead; }
     if (id === session.localId) d.dead ? applyDeadLocal() : applyDownLocal();
     if (!d.dead) run.downTimers.set(id, d.t ?? CONFIG.bleedOutSeconds);
-  });
+  }));
 
-  net.on(MSG.REVIVE, (d, from) => {
+  net.on(MSG.REVIVE, authed((d, from) => {
     if (!run) return;
     const id = session.roster[d.i]?.id;
     if (!id) return;
@@ -2017,25 +2088,74 @@ function wireNet(net) {
     if (target) target.downed = false;
     run.downTimers.delete(id);
     if (id === session.localId) applyReviveLocal();
-  });
+  }));
 
-  net.on(MSG.END, (d) => {
+  net.on(MSG.END, fromHost((d) => {
     if (d.full) { showMenuError('That house already has six people in it.'); return; }
     if (!isHost()) endRun(d.escaped, d.elapsed);
+  }));
+
+  net.on('deadroom', () => {
+    // The channel opened but the host never replied: their tab is gone and the
+    // signalling server has not noticed yet. Without this the player sits on a
+    // connected-but-silent screen indefinitely.
+    voice.shutdown();
+    session.net?.destroy();
+    session.net = null;
+    session.mode = 'solo';
+    session.roster = [];
+    show('multiplayer');
+    showMenuError('That room is not answering. The host has probably closed it.');
   });
 
   net.on('call', (call) => voice.accept(call));
   net.on('error', (err) => showMenuError(err?.message ?? 'Connection lost.'));
 }
 
+let loadWatch = null;
+
 function hostMarkLoaded(id) {
   const entry = session.roster.find((p) => p.id === id);
   if (entry) entry.loaded = true;
-  if (session.roster.every((p) => p.loaded)) {
-    session.net?.broadcast(MSG.BEGIN, {}, true);
-    if (run) run.begun = true;
-    for (const p of session.roster) p.loaded = false;
-  }
+  if (session.roster.every((p) => p.loaded)) hostBegin();
+}
+
+function hostBegin() {
+  clearTimeout(loadWatch);
+  loadWatch = null;
+  session.net?.broadcast(MSG.BEGIN, {}, true);
+  if (run) run.begun = true;
+  for (const p of session.roster) p.loaded = false;
+}
+
+/**
+ * Nobody waits forever for a straggler.
+ *
+ * A client whose tab was throttled, whose bake stalled, or that crashed during
+ * load simply never sends LOADED, and the old code left everybody frozen on the
+ * loading screen with no way out. START is re-sent once in case it was missed
+ * while the client was still setting up its handlers, and after that the run
+ * begins without them.
+ */
+function hostWatchLoading(difficultyId, seed) {
+  clearTimeout(loadWatch);
+  const resend = setTimeout(() => {
+    for (const p of session.roster) {
+      if (!p.loaded && p.id !== session.localId) {
+        session.net?.send(p.id, MSG.START, { difficultyId, seed }, true);
+      }
+    }
+  }, 6000);
+  loadWatch = setTimeout(() => {
+    clearTimeout(resend);
+    const stuck = session.roster.filter((p) => !p.loaded && p.id !== session.localId);
+    for (const p of stuck) {
+      session.net?.kick(p.id, 'You did not finish loading in time.');
+      session.roster = session.roster.filter((r) => r.id !== p.id);
+    }
+    if (stuck.length) broadcastLobby();
+    hostBegin();
+  }, 35000);
 }
 
 function broadcastLobby() {
@@ -2055,7 +2175,13 @@ function broadcastLobby() {
 /** Names arrive over the wire, so they are neither trusted nor unbounded. */
 function cleanName(raw) {
   const clean = String(raw ?? '')
+    // Control characters, then the invisible ones: zero-width joiners and
+    // bidirectional overrides let a name render as somebody else's, or as
+    // nothing at all. Everything reaches the DOM through textContent, so this
+    // is about impersonation and legibility rather than script injection.
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    .replace(/[\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 14);
   return clean || 'Someone';
@@ -2430,6 +2556,7 @@ el.startBtn.addEventListener('click', () => {
   if (isNet()) {
     for (const p of session.roster) p.loaded = false;
     session.net.broadcast(MSG.START, { difficultyId: session.difficultyId, seed }, true);
+    hostWatchLoading(session.difficultyId, seed);
   }
   startRun(difficultyById(session.difficultyId), seed);
 });
@@ -2446,7 +2573,10 @@ function updateMicUI() {
   const state = !voice.enabled
     ? (voice.denied ? 'denied' : 'off')
     : voice.muted ? 'muted' : 'live';
-  el.micState.textContent = state;
+  const { failed } = voice.linkReport;
+  el.micState.textContent = failed && voice.enabled
+    ? `${state} · ${failed} unreachable`
+    : state;
   el.mic.classList.toggle('off', state !== 'live');
   el.micHelp.classList.toggle('hidden', state !== 'denied');
 }
@@ -2468,6 +2598,7 @@ el.again.addEventListener('click', () => {
     roomLocked = true;
     for (const p of session.roster) p.loaded = false;
     session.net.broadcast(MSG.START, { difficultyId: session.difficultyId, seed }, true);
+    hostWatchLoading(session.difficultyId, seed);
     startRun(difficultyById(session.difficultyId), seed);
   } else if (!isNet()) {
     startRun(run.difficulty, seed);
@@ -2571,8 +2702,8 @@ $('te-reset').addEventListener('click', () => {
 $('open-touch-edit').addEventListener('click', openTouchEditor);
 $('open-touch-edit').classList.toggle('hidden', !TOUCH);
 
-// Fullscreen. Requires a user gesture, so it lives on a button rather than a
-// setting that could be applied on load.
+// Fullscreen. Requires a user gesture, so it is a button and a key press
+// rather than a setting that could be applied on load.
 function toggleFullscreen() {
   const doc = document;
   if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
@@ -2584,6 +2715,22 @@ function toggleFullscreen() {
 }
 for (const id of ['fullscreen', 'fullscreen-menu', 'fullscreen-settings']) {
   $(id)?.addEventListener('click', (e) => { e.stopPropagation(); toggleFullscreen(); });
+}
+
+/**
+ * Let the mouse go, or take it back.
+ *
+ * Escape always releases the pointer — that is the browser's own behaviour and
+ * cannot be reassigned — but it only goes one way, so getting back in meant
+ * clicking. This is the same toggle in both directions.
+ */
+function toggleCursor() {
+  if (document.pointerLockElement) { document.exitPointerLock?.(); return; }
+  // Only take it back if there is actually a game to look at.
+  if (!run || run.over || currentScreen !== null) return;
+  if (run.minigame || run.boardOpen) return;
+  const r = canvas.requestPointerLock();
+  if (r && typeof r.catch === 'function') r.catch(() => {});
 }
 
 // One Escape handler for every overlay. Pointer lock consumes its own Escape

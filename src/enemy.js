@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { findPath } from './generate.js';
 import { CONFIG } from './level.js';
 import { createGhostMaterial, createGlowMaterial } from './material.js';
+import { instance as modelInstance, has as hasModel } from './models.js';
 
 // ---------------------------------------------------------------------------
 // The ghost.
@@ -82,19 +83,29 @@ export class Ghost {
     this.onHit = null;
 
     // --- meshes ---
-    const body = new THREE.CapsuleGeometry(0.42, 1.5, 6, 14);
-    body.translate(0, 1.25, 0);
+    // A supplied ghost.glb if there is one, keeping its own materials; the
+    // rim-lit capsule otherwise. This was previously hardcoded to the capsule,
+    // so a supplied model showed up in the menu and nowhere else.
     this.material = createGhostMaterial();
     if (options.tint !== undefined) {
       this.material.uniforms.uCalm.value = new THREE.Color().setHex(options.tint, THREE.SRGBColorSpace);
     }
-    this.mesh = new THREE.Mesh(body, this.material);
+    const custom = modelInstance('ghost');
+    if (custom) {
+      this.mesh = custom;
+      this.usesModel = true;
+    } else {
+      const body = new THREE.CapsuleGeometry(0.42, 1.5, 6, 14);
+      body.translate(0, 1.25, 0);
+      this.mesh = new THREE.Mesh(body, this.material);
+    }
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 2;
     scene.add(this.mesh);
 
     this.knifeMaterial = createGlowMaterial(0xffd9a0, { additive: true, depthWrite: false, gain: 1.6 });
     this.knifeGeo = new THREE.BoxGeometry(0.06, 0.06, 0.5);
+    this.knifeModel = hasModel('knife');
     this.knifePool = new THREE.Group();
     scene.add(this.knifePool);
   }
@@ -117,8 +128,7 @@ export class Ghost {
       this.pos.x = sx;
       this.pos.z = sz;
       this.vel.multiplyScalar(Math.exp(-4.5 * dt));
-      this.material.uniforms.uTime.value = time;
-      this.material.uniforms.uRage.value = this.rage;
+      this._paint(time);
       this.mesh.position.set(this.pos.x, Math.sin(time * 9) * 0.12, this.pos.z);
       this._updateKnives(dt, players, grid);
       this._dist = this._nearest(players);
@@ -365,7 +375,7 @@ export class Ghost {
     const ax = tx - this.pos.x, az = tz - this.pos.z;
     const ad = Math.hypot(ax, az) || 1;
 
-    const mesh = new THREE.Mesh(this.knifeGeo, this.knifeMaterial);
+    const mesh = this._knifeMesh();
     mesh.frustumCulled = false;
     this.knifePool.add(mesh);
 
@@ -394,7 +404,13 @@ export class Ghost {
           if (pl.downed || pl.dead) continue;
           const hx = pl.pos.x - nx, hz = pl.pos.z - nz;
           if (hx * hx + hz * hz < 0.42 * 0.42) {
-            this.onHit?.(pl.id, 'knife');
+            // Rolled here, on the host, where the knife lives. A client
+            // holding its own dodge chance could simply never be hit.
+            if (Math.random() < (pl.knifeDodge ?? 0)) {
+              this.onDodge?.(pl.id, nx, nz);
+            } else {
+              this.onHit?.(pl.id, 'knife');
+            }
             dead = true;
             break;
           }
@@ -456,8 +472,21 @@ export class Ghost {
    * same straight line locally — far less traffic than streaming projectile
    * positions in every snapshot.
    */
+  /** Only the built-in capsule has shader uniforms; a model brings its own. */
+  _paint(time) {
+    if (this.usesModel) return;
+    this.material.uniforms.uTime.value = time;
+    this.material.uniforms.uRage.value = this.rage;
+  }
+
+  _knifeMesh() {
+    return this.knifeModel
+      ? modelInstance('knife')
+      : new THREE.Mesh(this.knifeGeo, this.knifeMaterial);
+  }
+
   addKnife(x, z, dx, dz) {
-    const mesh = new THREE.Mesh(this.knifeGeo, this.knifeMaterial);
+    const mesh = this._knifeMesh();
     mesh.frustumCulled = false;
     this.knifePool.add(mesh);
     this.knives.push({ x, z, y: 1.3, dx, dz, life: 3.0, mesh });
@@ -466,8 +495,7 @@ export class Ghost {
   /** Client-side per-frame work: move knives, animate, no authority. */
   updateVisualsOnly(dt, grid, time) {
     this._updateKnives(dt, [], grid);
-    this.material.uniforms.uTime.value = time;
-    this.material.uniforms.uRage.value = this.rage;
+    this._paint(time);
     this.mesh.position.set(this.pos.x, Math.sin(time * 1.4) * 0.05, this.pos.z);
   }
 

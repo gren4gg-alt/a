@@ -38,22 +38,36 @@ function loadOne(url) {
  * whatever units it was exported in. Blender metres, Maya centimetres and
  * whatever your marketplace model uses all end up the same size.
  */
+/**
+ * Scale a model to a known height, centre it on X/Z and sit it on the floor,
+ * then WRAP IT IN A GROUP.
+ *
+ * The wrapper is the whole point. The offsets have to live on something, and if
+ * they live on the model's own transform then the first caller to write
+ * `obj.position.set(x, y, z)` silently throws them away — which is exactly why
+ * a supplied ghost.glb appeared buried in the floor. With a wrapper, callers
+ * position the wrapper and the fit underneath is untouchable.
+ *
+ * @returns {{root: THREE.Group, size: THREE.Vector3}} size is post-fit, in metres
+ */
 function fit(object, targetHeight) {
   const box = new THREE.Box3().setFromObject(object);
   const size = new THREE.Vector3();
   box.getSize(size);
   if (size.y > 1e-4 && targetHeight) {
-    const k = targetHeight / size.y;
-    object.scale.multiplyScalar(k);
+    object.scale.multiplyScalar(targetHeight / size.y);
     box.setFromObject(object);
+    box.getSize(size);
   }
   const centre = new THREE.Vector3();
   box.getCenter(centre);
-  // Centre on X/Z, sit on the floor on Y.
   object.position.x -= centre.x;
   object.position.z -= centre.z;
   object.position.y -= box.min.y;
-  return object;
+
+  const root = new THREE.Group();
+  root.add(object);
+  return { root, size: size.clone() };
 }
 
 const cache = new Map();
@@ -65,9 +79,27 @@ const cache = new Map();
 export function instance(slot) {
   const entry = cache.get(slot);
   if (!entry) return null;
-  const copy = entry.scene.clone(true);
+  const copy = entry.root.clone(true);
   copy.animations = entry.animations;
   return copy;
+}
+
+/** Post-fit dimensions in metres, or null if the slot has no model. */
+export function sizeOf(slot) {
+  return cache.get(slot)?.size ?? null;
+}
+
+/**
+ * The best model for a character: their own if you supplied one, the generic
+ * player otherwise, and null if neither exists so the caller draws its
+ * primitive.
+ */
+export function characterModel(characterId) {
+  return instance(`player_${characterId}`) ?? instance('player');
+}
+
+export function hasCharacterModel(characterId) {
+  return has(`player_${characterId}`) || has('player');
 }
 
 export function has(slot) { return cache.has(slot); }
@@ -82,12 +114,46 @@ export function has(slot) { return cache.has(slot); }
 export function instanceScaled(slot, height) {
   const entry = cache.get(slot);
   if (!entry) return null;
-  const copy = entry.scene.clone(true);
-  const box = new THREE.Box3().setFromObject(copy);
-  const size = new THREE.Vector3();
-  box.getSize(size);
-  if (size.y > 1e-4 && height) copy.scale.multiplyScalar(height / size.y);
+  const copy = entry.root.clone(true);
+  if (entry.size.y > 1e-4 && height) copy.scale.setScalar(height / entry.size.y);
   return copy;
+}
+
+/**
+ * A clone scaled to sit INSIDE a given box, uniformly.
+ *
+ * Supplied models come at wildly different proportions — a chair that is twice
+ * as wide as it is tall will burst out of its footprint if you only match its
+ * height, and the collider stops agreeing with what you can see. Fitting to the
+ * tightest of the three axes keeps the model inside the space the generator
+ * reserved for it. Returns the achieved size so the caller can shrink the
+ * collider to match rather than guessing.
+ */
+/**
+ * What a model would become if asked to fit a box, without building it.
+ *
+ * The collider is generated before the meshes are, so the generator needs the
+ * achieved size in advance — otherwise a squat model keeps the tall footprint
+ * the generator invented and you collide with air above it.
+ */
+export function fitInfo(slot, w, h, d) {
+  const entry = cache.get(slot);
+  if (!entry) return null;
+  const s = entry.size;
+  if (s.x < 1e-4 || s.y < 1e-4 || s.z < 1e-4) return null;
+  const k = Math.min(w / s.x, h / s.y, d / s.z);
+  return { k, w: s.x * k, h: s.y * k, d: s.z * k };
+}
+
+export function instanceInBox(slot, w, h, d) {
+  const entry = cache.get(slot);
+  if (!entry) return null;
+  const s = entry.size;
+  if (s.x < 1e-4 || s.y < 1e-4 || s.z < 1e-4) return null;
+  const k = Math.min(w / s.x, h / s.y, d / s.z);
+  const copy = entry.root.clone(true);
+  copy.scale.setScalar(k);
+  return { object: copy, w: s.x * k, h: s.y * k, d: s.z * k };
 }
 
 export function animationsFor(slot) { return cache.get(slot)?.animations ?? []; }
@@ -104,9 +170,11 @@ export async function loadModels(onProgress) {
       const gltf = await loadOne(spec.url);
       const scene = gltf.scene ?? gltf.scenes?.[0];
       if (!scene) throw new Error('empty gltf');
-      fit(scene, spec.height);
       scene.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
-      cache.set(slot, { scene, animations: gltf.animations ?? [] });
+      const fitted = fit(scene, spec.height);
+      cache.set(slot, {
+        root: fitted.root, size: fitted.size, animations: gltf.animations ?? [],
+      });
       loaded.push(slot);
     } catch {
       missing.push(slot);

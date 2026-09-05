@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { createGlowMaterial } from './material.js';
+import { characterModel } from './models.js';
 
 // ---------------------------------------------------------------------------
 // Remote players.
@@ -31,7 +32,7 @@ export class RemotePlayer {
    * flight from before they were hit, would un-down them for a round trip and
    * the escape check could briefly count a body on the floor as standing.
    */
-  constructor(scene, id, name, colorIndex, trustFlags = true) {
+  constructor(scene, id, name, colorIndex, trustFlags = true, characterId = null) {
     this.id = id;
     this.name = name;
     this.trustFlags = trustFlags;
@@ -47,10 +48,16 @@ export class RemotePlayer {
     this.hidingClosetId = null;
     this.buffer = [];
 
-    const geo = new THREE.CapsuleGeometry(0.32, 1.0, 4, 12);
-    geo.translate(0, 0.94, 0);
+    // Their character's model where one exists. The glowing capsule is the
+    // fallback, and it is also what keeps a teammate findable in the dark, so
+    // the bead above them stays either way.
+    const model = characterId ? characterModel(characterId) : null;
     this.material = createGlowMaterial(this.color, { additive: true, depthWrite: false, gain: 0.9 });
-    this.mesh = new THREE.Mesh(geo, this.material);
+    this.usesModel = !!model;
+    this.mesh = model ?? new THREE.Mesh(
+      (() => { const g = new THREE.CapsuleGeometry(0.32, 1.0, 4, 12); g.translate(0, 0.94, 0); return g; })(),
+      this.material,
+    );
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 1;
     scene.add(this.mesh);
@@ -114,13 +121,13 @@ export class RemotePlayer {
     this.mesh.position.set(this.pos.x, this.downed ? -0.55 : 0, this.pos.z);
     this.mesh.rotation.set(this.downed ? Math.PI / 2.3 : 0, this.yaw, 0);
     this.bead.position.set(this.pos.x, this.downed ? 0.35 : (this.crouching ? 1.15 : 2.05), this.pos.z);
-    this.material.uniforms.uGain.value = this.downed ? 0.35 : 0.9;
+    if (!this.usesModel) this.material.uniforms.uGain.value = this.downed ? 0.35 : 0.9;
   }
 
   dispose(scene) {
     scene.remove(this.mesh);
     scene.remove(this.bead);
-    this.mesh.geometry.dispose();
+    this.mesh.geometry?.dispose();
     this.material.dispose();
     this.bead.geometry.dispose();
     this.bead.material.dispose();

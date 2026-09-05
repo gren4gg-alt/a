@@ -30,9 +30,22 @@
 
   .screen {
     position: fixed; inset: 0; z-index: 30; background: var(--void);
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 1.4rem; padding: 2rem 1.5rem; overflow-y: auto;
+    display: flex; flex-direction: column; align-items: center;
+    /* NOT justify-content: center. Centred flex content that overflows is
+       clipped at BOTH ends and the overflow above the start edge cannot be
+       scrolled to — which is why the Ready button was unreachable on a phone.
+       Auto margins centre it when there is room and scroll it when there is
+       not. */
+    justify-content: flex-start;
+    gap: 1.4rem;
+    padding: max(1.25rem, env(safe-area-inset-top)) 1.5rem
+             max(1.25rem, env(safe-area-inset-bottom));
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
   }
+  .screen > *:first-child { margin-top: auto; }
+  .screen > *:last-child { margin-bottom: auto; }
   h1 { margin: 0; font-size: clamp(1.6rem, 4.5vw, 2.6rem); font-weight: 300;
        letter-spacing: 0.34em; text-indent: 0.34em; }
   h2 { margin: 0; font-size: 1.05rem; font-weight: 400; letter-spacing: 0.14em; }
@@ -321,7 +334,8 @@
       rgba(5,7,10,0.45) 52%, rgba(5,7,10,0.05) 74%, transparent 90%);
     touch-action: none;
     align-items: flex-start; text-align: left;
-    padding: 2rem clamp(1.5rem, 7vw, 5.5rem);
+    padding: max(1.25rem, env(safe-area-inset-top)) clamp(1.5rem, 7vw, 5.5rem)
+             max(1.25rem, env(safe-area-inset-bottom));
     gap: 1.1rem;
   }
   .screen.diorama h1 {
@@ -467,6 +481,29 @@
   /* On a phone the HUD has to give the controls room, and the menus have to
      stop assuming a mouse-sized hit area. */
   @media (pointer: coarse) {
+    /* The diorama scrim has to cover the whole width once the panel does, or
+       the text sits on top of a lit wall and is unreadable. */
+    .screen.diorama {
+      background: linear-gradient(180deg,
+        rgba(5,7,10,0.96) 0%, rgba(5,7,10,0.92) 55%, rgba(5,7,10,0.86) 100%);
+      align-items: stretch;
+      touch-action: pan-y;
+    }
+    .screen { gap: 1rem; }
+    .screen.diorama h1 { text-align: left; }
+    .menu-list, #cards, #mode-cards, #roster, #shop-list,
+    #menu-forms, .col, #end-rows, #total-line { width: 100%; max-width: none; }
+
+    /* Whatever ends a screen is what you need to reach, so keep it in view
+       instead of at the bottom of a scroll nobody realises is there. */
+    #select > .row-h, #modes > .row-h, #end-buttons, #multiplayer .col {
+      position: sticky; bottom: 0; z-index: 2;
+      padding: 0.7rem 0 max(0.4rem, env(safe-area-inset-bottom));
+      background: linear-gradient(180deg, rgba(5,7,10,0) 0%, rgba(5,7,10,0.92) 35%);
+      margin-bottom: 0 !important;
+    }
+    #select > .row-h .btn, #modes > .row-h .btn { flex: 1; }
+
     #hud { left: 1rem; bottom: auto; top: 5.2rem; }
     #hud-timer { right: 1rem; bottom: auto; top: 1.2rem; }
     #power { right: 1rem; bottom: auto; top: 2.9rem; width: 9rem; }
@@ -481,6 +518,14 @@
     #shop-preview-wrap { position: static; transform: none; }
     .char-chip { padding: 0.75rem; }
     .tp, .rh { font-size: 0.78rem; }
+    /* Portrait is unplayable but the menus must still work in it. */
+    #char-list { grid-template-columns: 1fr; }
+    #preview-wrap, #shop-preview-wrap { padding-top: 0; }
+    .shop-card { flex-direction: column; align-items: stretch; gap: 0.6rem; }
+    .shop-side { justify-items: stretch; }
+    .shop-buy { width: 100%; }
+    .bind-row { font-size: 0.8rem; }
+    #settings-tabs button { padding: 0.5rem 0.7rem; font-size: 0.85rem; }
   }
   @media (pointer: coarse) and (orientation: portrait) {
     .tc-buttons { grid-template-columns: repeat(2, 4.2rem); }

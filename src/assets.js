@@ -60,8 +60,21 @@ export const USE_ASSET_TEXTURES = true;
 // ---------------------------------------------------------------------------
 
 export const MODEL_ASSETS = {
-  // Other players, and the figure on the character-select turntable.
+  // The fallback body, used for anyone without their own model below.
   player:    { url: 'assets/models/player.glb',    height: 1.75 },
+
+  // One per character, optional. Anything missing falls back to player.glb,
+  // and then to the built-in silhouette, so you can add them one at a time.
+  player_lamplighter: { url: 'assets/models/lamplighter.glb', height: 1.75 },
+  player_runner:      { url: 'assets/models/runner.glb',      height: 1.75 },
+  player_nurse:       { url: 'assets/models/nurse.glb',       height: 1.75 },
+  player_scavenger:   { url: 'assets/models/scavenger.glb',   height: 1.75 },
+  player_quiet:       { url: 'assets/models/quiet.glb',       height: 1.75 },
+  player_warden:      { url: 'assets/models/warden.glb',      height: 1.80 },
+  player_terminator:  { url: 'assets/models/terminator.glb',  height: 1.85 },
+
+  // The blade it throws at you.
+  knife:     { url: 'assets/models/knife.glb',     height: 0.42 },
   // The thing that hunts you.
   ghost:     { url: 'assets/models/ghost.glb',     height: 2.10 },
   // A closet you can hide inside. Needs a visible door on its -Z face.

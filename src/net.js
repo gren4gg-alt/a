@@ -47,7 +47,7 @@ export const MSG = {
  * otherwise joins successfully and then behaves inexplicably, which is far
  * harder to diagnose than being told to refresh.
  */
-export const PROTOCOL = 4;
+export const PROTOCOL = 5;
 
 /**
  * A stable id for this browser, surviving refreshes.
@@ -107,7 +107,16 @@ export class Net {
 
   // -- lifecycle ------------------------------------------------------------
 
-  hostGame(name) {
+  /**
+   * Open a room.
+   *
+   * The host's peer id is derived from the room code, which means it is
+   * guessable — somebody can register `darkhouse-v1-ABCDE` first and hijack
+   * that code, and two hosts can collide by chance. PeerServer reports this as
+   * `unavailable-id`, so a collision simply takes a different code rather than
+   * failing the player with an error they cannot act on.
+   */
+  hostGame(name, attempt = 0) {
     this.isHost = true;
     this.code = makeCode();
     this.hostId = PREFIX + this.code;
@@ -120,6 +129,11 @@ export class Net {
         resolve(this.code);
       });
       this.peer.on('error', (err) => {
+        if (!this.open && err?.type === 'unavailable-id' && attempt < 5) {
+          try { this.peer.destroy(); } catch { /* never opened */ }
+          resolve(this.hostGame(name, attempt + 1));
+          return;
+        }
         this._emit('error', err);
         if (!this.open) reject(err);
       });
@@ -157,6 +171,14 @@ export class Net {
           this.send(this.hostId, MSG.HELLO, { name }, true);
           this._emit('open', { id, code: this.code });
           resolve(this.code);
+
+          // A channel opening only proves the signalling server still has the
+          // id registered. If the host closed their tab without the server
+          // noticing, the socket opens and then nothing ever arrives. Require
+          // a real reply, not just a connection.
+          this._handshake = setTimeout(() => {
+            if (!this._greeted) this._emit('deadroom', {});
+          }, 9000);
         });
       });
 
@@ -170,6 +192,15 @@ export class Net {
   }
 
   _acceptConnection(conn) {
+    // A client never expects anybody to dial it. PeerJS ids are visible in the
+    // lobby, so without this a stranger could open a channel straight to a
+    // client and send it forged state, bypassing the host entirely. Voice is
+    // unaffected: media calls arrive through peer.on('call'), not here.
+    if (!this.isHost) {
+      try { conn.close(); } catch { /* already gone */ }
+      return;
+    }
+
     const role = conn.metadata?.role ?? 'rel';
     // Refuse before wiring anything up, so a rejected peer never lands in the
     // roster or receives a snapshot.
@@ -253,6 +284,10 @@ export class Net {
       if (!raw || typeof raw !== 'object') return;
       const entry = this.conns.get(peerId);
       if (entry) entry.lastSeen = Date.now();     // anything at all counts
+      if (!this.isHost) {
+        this._greeted = true;
+        clearTimeout(this._handshake);
+      }
       if (raw.t === 'ping') { try { conn.send({ t: 'pong', d: 0 }); } catch { /* gone */ } return; }
       if (raw.t === 'pong') return;
       this._emit(raw.t, raw.d, peerId);
@@ -289,10 +324,16 @@ export class Net {
     this.send(this.hostId, type, data, reliable);
   }
 
+  /** On a client, only the host is allowed to say anything. */
+  isFromHost(peerId) {
+    return !this.isHost && peerId === this.hostId;
+  }
+
   get peerIds() { return [...this.conns.keys()].filter((id) => id !== this.hostId || this.isHost); }
 
   destroy() {
     clearInterval(this._hb);
+    clearTimeout(this._handshake);
     try { this.peer?.destroy(); } catch { /* already gone */ }
     this.conns.clear();
     this.handlers.clear();

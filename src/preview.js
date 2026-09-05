@@ -22,8 +22,8 @@ export function buildFigure(c) {
   const dark = new THREE.MeshStandardMaterial({ color: 0x1d2129, roughness: 0.8 });
 
   const s = c.silhouette;
-  const width = s === 'broad' ? 0.42 : s === 'lean' ? 0.27 : 0.33;
-  const height = s === 'lean' ? 1.16 : s === 'broad' ? 0.98 : 1.06;
+  const width = s === 'broad' ? 0.42 : s === 'armoured' ? 0.45 : s === 'lean' ? 0.27 : 0.33;
+  const height = s === 'lean' ? 1.16 : s === 'broad' ? 0.98 : s === 'armoured' ? 1.02 : 1.06;
 
   const torso = new THREE.Mesh(new THREE.CapsuleGeometry(width, height, 6, 18), body);
   torso.position.y = 0.62 + height / 2 - 0.28;
@@ -74,6 +74,21 @@ export function buildFigure(c) {
     pads.rotation.z = Math.PI / 2;
     pads.position.y = torso.position.y + height / 2 - 0.06;
     g.add(pads);
+  }
+  if (s === 'armoured') {
+    // Plated, and squared off, so it reads as the one that stops things.
+    const chest = new THREE.Mesh(new THREE.BoxGeometry(width * 1.9, 0.52, width * 1.15), trim);
+    chest.position.y = torso.position.y + 0.18;
+    g.add(chest);
+    const pauldrons = new THREE.Mesh(new THREE.BoxGeometry(width * 2.5, 0.2, width * 1.1), trim);
+    pauldrons.position.y = torso.position.y + height / 2 - 0.02;
+    g.add(pauldrons);
+    const visor = new THREE.Mesh(
+      new THREE.BoxGeometry(width * 0.9, 0.09, 0.06),
+      new THREE.MeshStandardMaterial({ color: c.accent, emissive: c.accent, emissiveIntensity: 2.2 }),
+    );
+    visor.position.set(0, head.position.y + 0.03, -width * 0.55);
+    g.add(visor);
   }
   if (s === 'lean') {
     const scarf = new THREE.Mesh(new THREE.TorusGeometry(width * 0.72, 0.05, 6, 18), trim);

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { buildFigure } from './preview.js';
-import { instanceScaled } from './models.js';
+import { characterModel } from './models.js';
 
 // ---------------------------------------------------------------------------
 // The character room.
@@ -106,8 +106,9 @@ export class CharacterRoom {
 
   show(character) {
     this.figure.clear();
-    // A supplied player.glb if there is one; the primitive silhouette if not.
-    const model = instanceScaled('player', 1.75);
+    // Their own model if you supplied one, the generic body if not, and the
+    // built-in silhouette if neither.
+    const model = characterModel(character.id);
     this.figure.add(model ?? buildFigure(character));
     this.character = character;
 
