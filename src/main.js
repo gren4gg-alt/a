@@ -1,0 +1,2268 @@
+import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+import { CONFIG, RoomLookup } from './level.js';
+import { DIFFICULTIES, difficultyById } from './difficulty.js';
+import { generateLevel } from './generate.js';
+import {
+  buildWalls, buildColliders, buildOccluders,
+  wallGeometry, floorGeometry, ceilingGeometry, propGeometry, propColliders,
+} from './build.js';
+import { createBaker } from './bake.js';
+import { createHouseMaterial, createGlowMaterial, flickerSignal } from './material.js';
+import { Player, ColliderGrid, blocked } from './player.js';
+import { Visibility } from './rooms.js';
+import { Ghost } from './enemy.js';
+import { loadSurfaceTextures } from './textures.js';
+import { loadModels } from './models.js';
+import { Interactables } from './interact.js';
+import { instanceScaled, has as hasModel } from './models.js';
+import { startMinigame, GAME_NAMES } from './minigames.js';
+import { ceilingColliders, roomVariant } from './build.js';
+import { MenuScene } from './menuscene.js';
+import { TouchControls, isTouchDevice } from './touch.js';
+import { BoardEditor } from './boards.js';
+import { showRewarded, initAds, adsEnabled, menuCooldownLeft, markMenuAdWatched,
+         providerIsVerified, providerName } from './ads.js';
+import { AD_CONFIG } from './adsconfig.js';
+import { owns, buy, priceOf, firstOwned } from './shop.js';
+import { Audio } from './audio.js';
+import { Net, MSG } from './net.js';
+import { Voice } from './voice.js';
+import { RemotePlayer, PLAYER_COLORS, reviveCandidate, REVIVE_SECONDS } from './remote.js';
+import { settings, keyLabel } from './settings.js';
+import { buildSettingsUI } from './ui.js';
+import { CHARACTERS, characterById, Loadout, DEFAULT_CHARACTER, ABILITY_DURATION } from './characters.js';
+import { CharacterPreview } from './preview.js';
+
+const $ = (id) => document.getElementById(id);
+
+const SCREENS = ['menu', 'multiplayer', 'modes', 'select', 'shop', 'settings', 'about', 'loading', 'end', 'farewell'];
+const screens = Object.fromEntries(SCREENS.map((s) => [s, $(s)]));
+
+const el = {
+  name: $('name'), joinCode: $('join-code'), menuError: $('menu-error'), bank: $('bank'),
+  modeCards: $('mode-cards'), modeContinue: $('mode-continue'),
+  code: $('code'), codeLine: $('code-line'), roster: $('roster'),
+  charList: $('char-list'), charName: $('char-name'), charTag: $('char-tag'),
+  charPassive: $('char-passive'), charAbility: $('char-ability'),
+  charAbilityText: $('char-ability-text'), charKey: $('char-key'),
+  previewCanvas: $('preview'), readyBtn: $('ready-btn'), startBtn: $('start-btn'),
+  selectHint: $('select-hint'), houseName: $('house-name'), changeHouse: $('change-house'),
+  mic: $('mic'), micState: $('mic-state'), micHelp: $('mic-help'),
+  bar: $('bar'), loadNote: $('load-note'), loadTitle: $('load-title'),
+  hud: $('hud'), room: $('hud-room'), timer: $('hud-timer'), carry: $('hud-carry'),
+  team: $('team'), stats: $('stats'), fps: $('hud-fps'), drawn: $('hud-drawn'),
+  calls: $('hud-calls'), tris: $('hud-tris'), seed: $('seed'), net: $('hud-net'),
+  power: $('power'), powerName: $('power-name'), powerKey: $('power-key'), powerFill: $('power-fill'),
+  talk: $('talk-indicator'),
+  prompt: $('prompt'), promptKeys: $('prompt-keys'), vignette: $('vignette'),
+  use: $('use'), useLabel: $('use-label'), useKey: $('use-key'),
+  hiding: $('hiding'), hidingKey: $('hiding-key'),
+  door: $('door-status'), doorCount: $('door-count'),
+  tv: $('tv'), tvBody: $('tv-body'),
+  board: $('board'), boardBody: $('board-body'), boardRoom: $('board-room'),
+  rosterHud: $('roster-hud'),
+  shopList: $('shop-list'), shopBank: $('shop-bank'), shopNote: $('shop-note'),
+  shopPreview: $('shop-preview'), shopName: $('shop-name'), shopTag: $('shop-tag'),
+  adEarn: $('ad-earn'), adEarnNote: $('ad-earn-note'),
+  adModal: $('ad-modal'), adModalText: $('ad-modal-text'),
+  adRevive: $('ad-revive'), adReviveNote: $('ad-revive-note'),
+  vote: $('vote'), voteList: $('vote-list'), voteTimer: $('vote-timer'),
+  voteWatch: $('vote-watch'), voteQuit: $('vote-quit'),
+  carrying: $('carrying'), carryingName: $('carrying-name'),
+  downed: $('downed'), downedTimer: $('downed-timer'), downedNote: $('downed-note'),
+  revive: $('revive'), reviveBar: $('revive-bar'), reviveName: $('revive-name'), reviveKey: $('revive-key'),
+  endTitle: $('end-title'), endBody: $('end-body'), endRows: $('end-rows'),
+  endTotal: $('end-total'), again: $('again'), menuBtn: $('menu-btn'),
+  farewellBank: $('farewell-bank'),
+};
+
+let currentScreen = 'menu';
+function show(name) {
+  currentScreen = name;
+  for (const s of SCREENS) screens[s].classList.toggle('hidden', s !== name);
+  const inGame = name === null;
+  el.hud.classList.toggle('hidden', !inGame);
+  el.timer.classList.toggle('hidden', !inGame);
+  el.power.classList.toggle('hidden', !inGame);
+  el.rosterHud.classList.toggle('hidden', !inGame);
+  // These three were only ever toggled by gameplay, so they sat on top of the
+  // main menu: the click-to-look prompt, the door counter and the carry line.
+  el.door.classList.toggle('hidden', !inGame);
+  // There is nothing to capture on a touch device, and the prompt would just
+  // sit there telling you to click.
+  el.prompt.classList.toggle('hidden', TOUCH || !inGame || !!document.pointerLockElement);
+  $('touch').classList.toggle('hidden', !TOUCH || !inGame);
+  if (!inGame) el.carrying.classList.add('hidden');
+  $('fullscreen').classList.toggle('hidden', !inGame);
+}
+
+// Screens that sit over the diorama rather than blacking it out.
+const DIORAMA = new Set(['menu', 'multiplayer', 'modes', 'select', 'shop']);
+
+let menuScene = null;
+let menuLast = 0;
+
+function menuTick(now) {
+  requestAnimationFrame(menuTick);
+  const dt = Math.min((now - menuLast) / 1000, 0.1);
+  menuLast = now;
+  if (!menuScene || !DIORAMA.has(currentScreen)) return;
+  menuScene.update(dt);
+  menuScene.resize(window.innerWidth, window.innerHeight);
+  renderer.render(menuScene.scene, menuScene.camera);
+}
+
+async function ensureMenuScene() {
+  if (menuScene) return;
+  const surfaces = await ensureSurfaces();
+  if (menuScene) return;
+  menuScene = new MenuScene(surfaces, renderer.capabilities.getMaxAnisotropy());
+  menuScene.resize(window.innerWidth, window.innerHeight);
+}
+
+/**
+ * Run an ad behind a modal so the player knows something is happening and
+ * cannot walk off mid-view. Always resolves; 'unavailable' is a normal
+ * outcome (ad blockers are common) and has to be shown, not swallowed.
+ */
+async function playAd(name, label) {
+  el.adModal.classList.remove('hidden');
+  el.adModalText.textContent = label;
+  const result = await showRewarded(name, (left) => {
+    el.adModalText.textContent = `${label} \u2014 ${left}s`;
+  });
+  if (result === 'unavailable') {
+    el.adModalText.textContent = providerName() === 'off'
+      ? 'Ads are switched off in this build.'
+      : 'No ad available. An ad blocker or no fill \u2014 nothing was charged.';
+    await new Promise((r) => setTimeout(r, 1800));
+  }
+  el.adModal.classList.add('hidden');
+  return result;
+}
+
+const Bank = {
+  read() {
+    try { return parseInt(localStorage.getItem('darkhouse.bank') ?? '0', 10) || 0; }
+    catch { return this._mem ?? 0; }
+  },
+  write(v) {
+    this._mem = v;
+    try { localStorage.setItem('darkhouse.bank', String(v)); } catch { /* memory only */ }
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Renderer. Antialiasing cannot be toggled on a live WebGL context, so a change
+// swaps in a fresh canvas. Only ever done from a menu, never mid-run.
+// ---------------------------------------------------------------------------
+
+const TOUCH = isTouchDevice();
+let touchControls = null;
+
+let canvas = $('view');
+let renderer = null;
+let rendererAA = null;
+const camera = new THREE.PerspectiveCamera(74, 1, 0.05, 60);
+const audio = new Audio();
+const voice = new Voice(audio);
+
+function makeRenderer() {
+  rendererAA = settings.quality.aa;
+  const r = new THREE.WebGLRenderer({
+    canvas, antialias: rendererAA, powerPreference: 'high-performance', stencil: false,
+  });
+  r.setClearColor(CONFIG.fogColor, 1);
+  return r;
+}
+
+function applyGraphics() {
+  settings.applyToConfig();
+  if (renderer && rendererAA !== settings.quality.aa && !run) {
+    const next = canvas.cloneNode(false);
+    canvas.parentNode.replaceChild(next, canvas);
+    canvas = next;
+    renderer.dispose();
+    renderer = makeRenderer();
+  }
+  if (!renderer) renderer = makeRenderer();
+  // Phones report devicePixelRatio 3 or 4. Honouring that renders nine to
+  // sixteen times the pixels of the CSS size for no visible gain and a lot of
+  // heat, so the ceiling is tighter on touch regardless of the preset.
+  const cap = TOUCH ? Math.min(settings.quality.pixelRatio, 1.0) : settings.quality.pixelRatio;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, cap));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.fov = settings.data.graphics.fov;
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.far = CONFIG.drawDistance + 14;
+  camera.updateProjectionMatrix();
+}
+
+function applyAudio() {
+  audio.setVolumes(settings.data.volume);
+  voice.setPushToTalk(settings.data.voice.pushToTalk);
+  voice.setInputGain(settings.data.voice.inputGain ?? 1);
+}
+
+window.addEventListener('resize', () => {
+  renderer?.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  preview?.resize();
+  shopPreview?.resize();
+  menuScene?.resize(window.innerWidth, window.innerHeight);
+});
+
+// ---------------------------------------------------------------------------
+// Session
+// ---------------------------------------------------------------------------
+
+const session = {
+  mode: 'solo',
+  net: null,
+  localId: 'solo',
+  name: 'Someone',
+  roster: [],
+  difficultyId: DIFFICULTIES[0].id,
+  character: DEFAULT_CHARACTER,
+  ready: false,
+};
+
+const isNet = () => session.mode !== 'solo';
+const isHost = () => session.mode !== 'client';
+const rosterIndex = (id) => session.roster.findIndex((p) => p.id === id);
+const meInRoster = () => session.roster.find((p) => p.id === session.localId);
+
+// ---------------------------------------------------------------------------
+// Run
+// ---------------------------------------------------------------------------
+
+let run = null;
+let rafId = 0;
+
+function disposeRun() {
+  if (!run) return;
+  touchControls?.detach();
+  closeBoard();
+  cancelAnimationFrame(rafId);
+  run.player.releaseInput();
+  for (const r of run.remotes.values()) r.dispose(run.scene);
+  run.scene.traverse((o) => {
+    if (o.isMesh || o.isLineSegments) {
+      o.geometry?.dispose();
+      if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
+      else o.material?.dispose();
+    }
+  });
+  run = null;
+}
+
+let surfacesPromise = null;
+function ensureSurfaces() {
+  if (!surfacesPromise) {
+    surfacesPromise = Promise.all([
+      loadSurfaceTextures(renderer.capabilities.getMaxAnisotropy()),
+      // Models are optional; every slot falls back to a primitive, so a
+      // failure here is not worth blocking the house on.
+      loadModels().catch(() => ({ loaded: [], missing: [] })),
+    ]).then(([surfaces]) => surfaces);
+  }
+  return surfacesPromise;
+}
+
+async function startRun(difficulty, seed) {
+  disposeRun();
+  audio.resume();
+  applyAudio();
+  applyGraphics();
+
+  el.loadTitle.textContent = difficulty.label;
+  el.loadNote.textContent = 'Finding the walls';
+  el.bar.style.width = '0%';
+  show('loading');
+
+  // Supplied images if assets/textures holds any, generated tiles otherwise.
+  // Resolved once and cached, so only the first house ever waits.
+  const surfaces = await ensureSurfaces();
+
+  el.loadNote.textContent = 'Laying out the rooms';
+  const level = generateLevel(difficulty, seed);
+  const scene = new THREE.Scene();
+  const material = createHouseMaterial(surfaces, renderer.capabilities.getMaxAnisotropy());
+  renderer.setClearColor(CONFIG.fogColor, 1);
+  camera.far = CONFIG.drawDistance + 14;
+  camera.updateProjectionMatrix();
+
+  const wallBoxes = buildWalls(level);
+  const occluders = buildOccluders(wallBoxes);
+
+  const chunkMap = new Map();
+  const CS = CONFIG.wallChunkSize;
+  const wallItems = [];
+  for (const b of wallBoxes) {
+    const owner = nearestRoom(level, b.cx, b.cz);
+    const geo = wallGeometry(b, roomVariant(owner.id));
+    wallItems.push({ geometry: geo, albedo: owner.wall });
+    const key = `${Math.floor(b.cx / CS)},${Math.floor(b.cz / CS)}`;
+    if (!chunkMap.has(key)) chunkMap.set(key, []);
+    chunkMap.get(key).push(geo);
+  }
+
+  const roomItems = new Map();
+  for (const r of level.rooms) {
+    roomItems.set(r.id, [
+      { geometry: floorGeometry(r), albedo: r.floor },
+      { geometry: ceilingGeometry(r), albedo: r.ceil },
+    ]);
+  }
+  // A prop with a supplied model cannot take the vertex bake — its mesh is not
+  // tessellated for it — so only the box fallbacks are merged into the room's
+  // baked geometry. Modelled pieces are added separately after the bake.
+  for (const p of level.props) {
+    if (hasModel(p.kind)) continue;
+    roomItems.get(p.room)?.push({ geometry: propGeometry(p), albedo: p.color });
+  }
+
+  el.loadNote.textContent = 'Lighting the rooms';
+  const baker = createBaker([...wallItems, ...[...roomItems.values()].flat()], level.lights, occluders);
+  const t0 = performance.now();
+
+  (function bakeStep() {
+    if (baker.step(14)) {
+      el.bar.style.width = '100%';
+      finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, roomItems,
+                  performance.now() - t0, baker.total);
+      return;
+    }
+    el.bar.style.width = `${(baker.progress * 100).toFixed(1)}%`;
+    requestAnimationFrame(bakeStep);
+  })();
+}
+
+function nearestRoom(level, x, z) {
+  let best = level.rooms[0], bestD = Infinity;
+  for (const r of level.rooms) {
+    const cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2;
+    const d = (x - cx) ** 2 + (z - cz) ** 2;
+    if (d < bestD) { bestD = d; best = r; }
+  }
+  return best;
+}
+
+function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, roomItems, bakeMs, verts) {
+  const wallChunks = [];
+  for (const [key, geos] of chunkMap) {
+    const [i, j] = key.split(',').map(Number);
+    const mesh = new THREE.Mesh(mergeGeometries(geos), material);
+    scene.add(mesh);
+    wallChunks.push({ mesh, cx: (i + 0.5) * CONFIG.wallChunkSize, cz: (j + 0.5) * CONFIG.wallChunkSize });
+  }
+
+  // A Group per room rather than a Mesh, so modelled furniture rides the same
+  // portal culling as the baked geometry. Visibility only ever touches the
+  // top-level object, so nothing else needed changing.
+  const roomMeshes = new Map();
+  for (const [roomId, items] of roomItems) {
+    const group = new THREE.Group();
+    if (items.length) {
+      group.add(new THREE.Mesh(mergeGeometries(items.map((i) => i.geometry)), material));
+    }
+    scene.add(group);
+    roomMeshes.set(roomId, group);
+  }
+
+  let modelled = 0;
+  for (const p of level.props) {
+    if (!hasModel(p.kind)) continue;
+    const obj = instanceScaled(p.kind, p.h);
+    if (!obj) continue;
+    obj.position.set(p.x, p.y ?? 0, p.z);
+    obj.rotation.y = p.facing;
+    roomMeshes.get(p.room)?.add(obj);
+    modelled++;
+  }
+
+  const interact = new Interactables(scene, level);
+  const grid = new ColliderGrid([
+    ...buildColliders(wallBoxes),
+    ...propColliders(level.props),
+    // Low ceilings need colliders or you can crouch into a tunnel and stand up
+    // inside it — the mesh alone stops nothing.
+    ...ceilingColliders(level.rooms),
+    ...interact.colliders(),
+  ]);
+  const lookup = new RoomLookup(level);
+
+  const lootMat = createGlowMaterial(0xffd27f, { additive: true, depthWrite: false, pulse: 0.35, gain: 1.4 });
+  const beadMat = createGlowMaterial(0xffd27f, { additive: true, depthWrite: false, pulse: 0.5, gain: 1.7 });
+  const lootGeo = new THREE.OctahedronGeometry(0.22, 0);
+  const beadGeo = new THREE.SphereGeometry(0.08, 8, 6);
+  const lootItems = level.loot.map((l) => {
+    const mesh = new THREE.Mesh(lootGeo, lootMat);
+    mesh.position.set(l.x, 0.85, l.z);
+    scene.add(mesh);
+    const bead = new THREE.Mesh(beadGeo, beadMat);
+    bead.position.set(l.x, 1.7, l.z);
+    bead.renderOrder = 3;
+    bead.frustumCulled = false;
+    bead.visible = false;
+    scene.add(bead);
+    return { ...l, mesh, bead, taken: false, owner: null };
+  });
+
+  const exitRoom = level.rooms.find((r) => r.id === level.exitId);
+  const exitMat = createGlowMaterial(0x9fffc8, { additive: true, depthWrite: false, pulse: 0.5, gain: 1.2 });
+  const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.5, 2.9, 12, 1, true), exitMat);
+  pillar.position.set((exitRoom.x0 + exitRoom.x1) / 2, 1.45, (exitRoom.z0 + exitRoom.z1) / 2);
+  scene.add(pillar);
+
+  const exitBead = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 8),
+    createGlowMaterial(0x9fffc8, { additive: true, depthWrite: false, gain: 2.0 }));
+  exitBead.position.set(pillar.position.x, 3.4, pillar.position.z);
+  exitBead.frustumCulled = false;
+  exitBead.renderOrder = 3;
+  exitBead.visible = false;
+  scene.add(exitBead);
+
+  // Snares the ghost leaves behind on the harder houses. Faint on purpose:
+  // visible if you are watching the floor, invisible if you are running.
+  const trapMat = createGlowMaterial(0xc4321f, { additive: true, depthWrite: false, pulse: 0.7, gain: 0.55 });
+  const trapGeo = new THREE.TorusGeometry(0.5, 0.045, 6, 18);
+  trapGeo.rotateX(Math.PI / 2);
+  const trapGroup = new THREE.Group();
+  scene.add(trapGroup);
+
+  const flare = new THREE.Mesh(new THREE.IcosahedronGeometry(0.17, 0),
+    createGlowMaterial(0xff8a30, { additive: true, depthWrite: false, pulse: 0.6, gain: 2.2 }));
+  flare.frustumCulled = false;
+  flare.visible = false;
+  scene.add(flare);
+
+  // -- local player and loadout -------------------------------------------
+
+  const myIndex = Math.max(0, rosterIndex(session.localId));
+  const loadout = new Loadout(characterById(session.character));
+
+  const player = new Player(camera, level.spawn);
+  player.id = session.localId;
+  player.isLocal = true;
+  player.dead = false;
+  player.name = session.name;
+  player.speedScale = loadout.stats.sprintScale;
+  player.loudness = loadout.stats.loudnessScale;
+  player.bindInput(canvas);
+  player.onFlashToggle = () => {
+    material.uniforms.uFlashOn.value = material.uniforms.uFlashOn.value > 0.5 ? 0 : 1;
+  };
+  player.onDebugToggle = () => el.stats.classList.toggle('on');
+  player.onPower = () => firePower();
+  player.onInteract = () => useNearest();
+  if (TOUCH) {
+    touchControls = touchControls ?? new TouchControls($('touch'));
+    touchControls.attach(player);
+  }
+  player.onLockChange = (locked) => {
+    el.prompt.classList.toggle('hidden', TOUCH || locked || currentScreen !== null);
+  };
+
+  material.uniforms.uFlashRange.value *= loadout.stats.flashlightRange;
+
+  if (isNet()) {
+    const angle = (myIndex / Math.max(1, session.roster.length)) * Math.PI * 2;
+    player.pos.x += Math.cos(angle) * 3.2;
+    player.pos.z += Math.sin(angle) * 3.2;
+  }
+
+  const remotes = new Map();
+  const loadouts = new Map([[session.localId, loadout]]);
+  for (const p of session.roster) {
+    if (p.id === session.localId) continue;
+    const r = new RemotePlayer(scene, p.id, p.name, rosterIndex(p.id), !isHost());
+    const lo = new Loadout(characterById(p.char ?? DEFAULT_CHARACTER));
+    r.loudness = lo.stats.loudnessScale;
+    remotes.set(p.id, r);
+    loadouts.set(p.id, lo);
+  }
+
+  // Three of them. Spawned far apart and biased to stay that way, so the maze
+  // has no safe quarter rather than one busy corridor.
+  const spawns = level.ghostSpawns?.length ? level.ghostSpawns : [level.ghostSpawn];
+  const count = level.ghostCount ?? spawns.length;
+  const ghosts = spawns.slice(0, count).map((spawn, index) => {
+    const g = new Ghost(scene, level, difficulty.ghost, lookup, {
+      index, spawn, count, tint: GHOST_TINTS[index % GHOST_TINTS.length],
+    });
+    g.onThrow = (d, knife) => {
+      audio.knifeThrow(d);
+      if (isHost() && isNet()) {
+        session.net.broadcast(MSG.KNIFE, {
+          gi: index, x: r2(knife.x), z: r2(knife.z), dx: r3(knife.dx), dz: r3(knife.dz),
+        }, true);
+      }
+    };
+    g.onHit = (playerId) => hostKnockDown(playerId);
+    g.onTrap = (x, z) => {
+      addTrap(x, z);
+      if (isHost() && isNet()) session.net.broadcast(MSG.TRAP, { n: 'add', x: r2(x), z: r2(z) }, true);
+    };
+    return g;
+  });
+
+  const vis = new Visibility(level, roomMeshes, wallChunks);
+  vis.update(player.pos.x, player.pos.z);
+
+  run = {
+    difficulty, level, scene, material, player, remotes, ghosts, vis, grid,
+    loadout, loadouts, interact, lootItems, lootMat, beadMat, exitMat, exitRoom, pillar,
+    carrying: null, minigame: null, busyTerminals: new Map(), useTarget: null,
+    boardOpen: null, boardEditor: null, adRevives: 0, vote: null,
+    exitBead, flare, flareUntil: 0, senseUntil: 0,
+    trapMat, trapGeo, trapGroup, traps: [],
+    carried: [], elapsed: 0, over: false, begun: !isNet(),
+    downTimers: new Map(), reviveProgress: 0, reviveTarget: null,
+    time: 0, sendAcc: 0, snapAcc: 0,
+    stats: { bakeMs, verts },
+  };
+
+  el.loadNote.textContent =
+    `${verts.toLocaleString()} vertices lit in ${bakeMs.toFixed(0)} ms · ` +
+    `${level.stats.plots} rooms, ${level.stats.corridors} passages` +
+    (modelled ? ` · ${modelled} pieces of furniture` : '');
+  el.room.textContent = 'Entrance';
+  el.carry.textContent = 'nothing';
+  el.seed.textContent = `seed ${level.seed}`;
+  el.powerName.textContent = loadout.char.ability;
+  el.powerKey.textContent = keyLabel(settings.data.binds.power);
+  el.reviveKey.textContent = keyLabel(settings.data.binds.interact);
+  el.useKey.textContent = keyLabel(settings.data.binds.interact);
+  el.hidingKey.textContent = keyLabel(settings.data.binds.interact);
+  el.doorCount.textContent = `0/${level.holders.length}`;
+  el.promptKeys.innerHTML = promptText();
+
+  if (isNet() && !isHost()) {
+    session.net.toHost(MSG.LOADED, {}, true);
+    el.loadNote.textContent += ' · waiting for the others';
+  }
+  if (isNet() && isHost()) hostMarkLoaded(session.localId);
+
+  setTimeout(() => {
+    show(null);
+    lastFrame = performance.now();
+    rafId = requestAnimationFrame(frame);
+  }, isNet() ? 200 : 450);
+}
+
+function promptText() {
+  const b = settings.data.binds;
+  const k = (id) => `<b>${keyLabel(b[id])}</b>`;
+  return `${k('forward')}${k('left')}${k('back')}${k('right')} move · ${k('sprint')} run · ${k('crouch')} crouch<br>` +
+    `${k('flashlight')} torch · ${k('power')} ability · ${k('interact')} pick someone up<br>` +
+    `${k('talk')} talk · ${k('stats')} stats · <b>Esc</b> free the cursor<br>` +
+    `<span style="opacity:0.7">Crawl holes are too low for it to follow you through.</span>`;
+}
+
+// Enough hues that adjacent ghosts rarely match; with one per ten rooms there
+// can be nearly twenty of them.
+const GHOST_TINTS = [
+  0x7fd6ff, 0xffa46b, 0xbf9dff, 0x86e0b4, 0xff9db8,
+  0xffe08a, 0x9db8ff, 0xd9a0ff, 0x8ad8d0, 0xffb0a0,
+];
+
+function addTrap(x, z) {
+  if (!run) return;
+  const mesh = new THREE.Mesh(run.trapGeo, run.trapMat);
+  mesh.position.set(x, 0.05, z);
+  mesh.frustumCulled = false;
+  run.trapGroup.add(mesh);
+  run.traps.push({ x, z, armed: true, mesh });
+  // Old snares decay so a long run does not end up wall-to-wall with them.
+  if (run.traps.length > 30) {
+    const dead = run.traps.shift();
+    run.trapGroup.remove(dead.mesh);
+  }
+}
+
+/** Nearest ghost, for the torch stutter and the tension bed. */
+/**
+ * Floorboards, from whatever is nearest.
+ *
+ * Only the three closest are audible: with up to twenty-eight of them a
+ * distance check alone would produce a constant wall of creaking. Each keeps
+ * its own step timer driven by how fast it is actually moving, so a hunting
+ * ghost audibly speeds up.
+ */
+function ghostFootsteps(dt) {
+  const heard = run.ghosts
+    .map((g) => ({ g, d: g.distanceToPlayer }))
+    .filter((e) => e.d < GHOST_EARSHOT)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, 3);
+
+  for (const { g, d } of heard) {
+    const speed = Math.hypot(g.vel.x, g.vel.z);
+    if (speed < 0.35) continue;
+    g.stepTimer = (g.stepTimer ?? Math.random() * 0.6) - dt * speed;
+    if (g.stepTimer > 0) continue;
+    g.stepTimer = 1.5;
+    const near = 1 - d / GHOST_EARSHOT;
+    audio.creak(near * near, g.state === 'hunt');
+  }
+}
+
+const GHOST_EARSHOT = 16;
+
+function nearestGhostDistance() {
+  let best = Infinity;
+  for (const g of run.ghosts) best = Math.min(best, g.distanceToPlayer);
+  return best;
+}
+const anyHunting = () => run.ghosts.some((g) => g.state === 'hunt');
+
+const r2 = (v) => Math.round(v * 100) / 100;
+const r3 = (v) => Math.round(v * 1000) / 1000;
+
+const allPlayers = () => [run.player, ...run.remotes.values()];
+const livePlayers = () => allPlayers().filter((p) => !p.dead);
+
+// ---------------------------------------------------------------------------
+// Abilities
+// ---------------------------------------------------------------------------
+
+function firePower() {
+  if (!run || run.over || !run.begun) return;
+  const lo = run.loadout;
+  const id = lo.char.id;
+  if (run.player.dead) return;
+  // The Nurse's ability only exists while you are on the floor; everyone
+  // else's only exists while you are not.
+  if (id === 'nurse' ? !run.player.downed : run.player.downed) return;
+  if (!lo.fire()) return;
+
+  applyPower(id, run.player.pos.x, run.player.pos.z, session.localId);
+  if (isNet()) {
+    const payload = { c: id, x: r2(run.player.pos.x), z: r2(run.player.pos.z), i: rosterIndex(session.localId) };
+    if (isHost()) session.net.broadcast(MSG.POWER, payload, true);
+    else session.net.toHost(MSG.POWER, payload, true);
+  }
+}
+
+/** Runs on every machine for anything visible; host-only bits are guarded. */
+function applyPower(charId, x, z, ownerId) {
+  const mine = ownerId === session.localId;
+
+  switch (charId) {
+    case 'lamplighter': {
+      run.flare.position.set(x, 1.1, z);
+      run.flare.visible = true;
+      run.flareUntil = run.time + ABILITY_DURATION.lamplighter;
+      run.material.uniforms.uFlarePos.value.set(x, 1.1, z);
+      run.material.uniforms.uFlareOn.value = 1;
+      // A flare pulls every one of them. Bright, loud, and a genuine gamble.
+      if (isHost()) for (const g of run.ghosts) g.lure(x, z);
+      audio.pickup(40);
+      break;
+    }
+    case 'runner':
+      if (mine) run.player.speedScale = run.loadout.stats.sprintScale * 1.42;
+      break;
+    case 'quiet': {
+      const target = allPlayers().find((p) => p.id === ownerId);
+      if (target) target.undetectableUntil = run.time + ABILITY_DURATION.quiet;
+      break;
+    }
+    case 'scavenger':
+      if (mine) run.senseUntil = run.time + ABILITY_DURATION.scavenger;
+      break;
+    case 'warden': {
+      if (isHost()) {
+        // Shoves whichever is within reach, not all of them.
+        for (const g of run.ghosts) {
+          if (Math.hypot(g.pos.x - x, g.pos.z - z) < 4.0) {
+            g.shove(ABILITY_DURATION.warden, x, z);
+          }
+        }
+      }
+      audio.hit();
+      break;
+    }
+    case 'nurse':
+      if (isHost()) hostRevive(ownerId);
+      break;
+    default: break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Using things
+// ---------------------------------------------------------------------------
+
+function useNearest() {
+  if (!run || run.over || !run.begun || run.minigame) return;
+  const p = run.player;
+  if (p.dead) return;
+
+  // Already inside a closet: the same key gets you back out.
+  if (p.hiding) { requestHide(p.hiding.id, false); return; }
+  if (p.downed) return;
+
+  // Reviving owns the key whenever a body is in reach; it is the more urgent
+  // of the two and holding for it must not be interrupted by a closet behind.
+  if (reviveCandidate(p.pos, [...run.remotes.values()])) return;
+
+  const target = run.useTarget;
+  if (!target) return;
+
+  switch (target.kind) {
+    case 'closet': requestHide(target.id, true); break;
+    case 'terminal': openTerminal(target.id); break;
+    case 'relic': requestRelic('taken', target.id); break;
+    case 'holder': requestRelic('placed', run.carrying.id); break;
+    case 'board': openBoard(target.id); break;
+    default: break;
+  }
+}
+
+// -- closets ---------------------------------------------------------------
+
+function requestHide(closetId, entering) {
+  if (isHost()) { hostSetHide(closetId, entering ? session.localId : null); return; }
+  session.net.toHost(MSG.HIDE, { c: closetId, on: entering }, true);
+}
+
+function hostSetHide(closetId, playerId) {
+  const c = run.interact.closetById(closetId);
+  if (!c) return;
+  if (playerId) {
+    if (c.occupant) return;                       // one at a time, first come
+    // Leave whatever else they were in.
+    for (const other of run.interact.closets) {
+      if (other.occupant === playerId) applyHide(other.id, null);
+    }
+  } else if (c.occupant !== playerId && c.occupant !== null) {
+    // only the occupant may leave
+  }
+  applyHide(closetId, playerId);
+  if (isNet()) {
+    session.net.broadcast(MSG.HIDE, {
+      c: closetId, i: playerId ? rosterIndex(playerId) : null,
+    }, true);
+  }
+}
+
+/**
+ * Somewhere clear to stand when you come out.
+ *
+ * Stepping out used to leave you on the closet's own position, which is inside
+ * its collider and usually a hand's width from a wall. The push-out then had to
+ * resolve a deep overlap against two surfaces at once and could eject you
+ * through the wall or wedge you. Pick a spot that is actually free instead.
+ */
+function closetExitSpot(closetId) {
+  const c = run.interact.closetById(closetId);
+  if (!c) return null;
+  const fx = -Math.sin(c.facing), fz = -Math.cos(c.facing);
+  const sx = -fz, sz = fx;                     // sideways, if straight out is blocked
+  const tries = [
+    [1.30, 0], [1.70, 0], [1.30, 0.7], [1.30, -0.7],
+    [2.10, 0], [1.70, 1.0], [1.70, -1.0],
+  ];
+  for (const [ahead, side] of tries) {
+    const x = c.x + fx * ahead + sx * side;
+    const z = c.z + fz * ahead + sz * side;
+    if (!blocked(x, z, CONFIG.playerRadius, CONFIG.standClearance, run.grid)) return { x, z };
+  }
+  // Nothing clear: still better to be in front of it than inside it.
+  return { x: c.x + fx * 1.3, z: c.z + fz * 1.3 };
+}
+
+function applyHide(closetId, playerId) {
+  const wasMine = run.player.hiding?.id === closetId;
+  run.interact.setClosetOccupant(closetId, playerId);
+  const target = playerId ? allPlayers().find((pl) => pl.id === playerId) : null;
+  for (const pl of allPlayers()) {
+    if (pl.hidingClosetId === closetId && pl !== target) pl.hidingClosetId = null;
+  }
+  if (target) target.hidingClosetId = closetId;
+
+  if (!playerId || playerId === session.localId) {
+    const mine = run.interact.closets.find((c) => c.occupant === session.localId);
+    const nowHiding = mine ? run.interact.hideSpot(mine.id) : null;
+    if (!nowHiding && wasMine) {
+      const spot = closetExitSpot(closetId);
+      if (spot) { run.player.pos.x = spot.x; run.player.pos.z = spot.z; }
+      run.player.crouching = false;
+      run.player.vel.set(0, 0, 0);
+    }
+    run.player.hiding = nowHiding;
+    el.hiding.classList.toggle('hidden', !run.player.hiding);
+  }
+}
+
+// -- blackboards -----------------------------------------------------------
+
+function openBoard(id) {
+  const b = run.interact.boardById(id);
+  if (!b) return;
+  document.exitPointerLock?.();
+  el.board.classList.remove('hidden');
+  el.boardRoom.textContent = run.vis.roomName;
+  run.boardOpen = id;
+  run.boardEditor = new BoardEditor(el.boardBody, b.board, (stroke) => {
+    if (!isNet()) return;
+    const msg = { b: id, s: stroke };
+    isHost() ? session.net.broadcast(MSG.BOARD, msg, true)
+             : session.net.toHost(MSG.BOARD, msg, true);
+  });
+}
+
+function closeBoard() {
+  if (!run?.boardOpen) return;
+  run.boardOpen = null;
+  run.boardEditor = null;
+  el.boardBody.innerHTML = '';
+  el.board.classList.add('hidden');
+}
+
+// -- terminals -------------------------------------------------------------
+
+function openTerminal(id) {
+  const t = run.interact.terminals.find((x) => x.id === id);
+  if (!t || t.solved || t.busy) return;
+
+  document.exitPointerLock?.();
+  el.tv.classList.remove('hidden');
+  run.minigame = {
+    id,
+    controller: startMinigame(t.game, el.tvBody, {
+      title: t.name,
+      onWin: () => { requestRelic('solved', id); closeTerminal(); },
+      onQuit: () => closeTerminal(),
+    }),
+  };
+  setTerminalBusy(id, true);
+}
+
+function closeTerminal() {
+  if (!run?.minigame) return;
+  const { id, controller } = run.minigame;
+  controller.destroy();
+  run.minigame = null;
+  el.tv.classList.add('hidden');
+  setTerminalBusy(id, false);
+}
+
+function setTerminalBusy(id, on) {
+  run.interact.setTerminalBusy(id, on);
+  const t = run.interact.terminals.find((x) => x.id === id);
+  if (on && t) run.busyTerminals.set(id, { x: t.x, z: t.z, next: 0 });
+  else run.busyTerminals.delete(id);
+  if (isNet()) {
+    const payload = { n: 'busy', id, on };
+    isHost() ? session.net.broadcast(MSG.RELIC, payload, true)
+             : session.net.toHost(MSG.RELIC, payload, true);
+  }
+}
+
+function requestRelic(kind, id) {
+  if (isHost()) { hostRelic(kind, id, session.localId); return; }
+  session.net.toHost(MSG.RELIC, { n: kind, id }, true);
+}
+
+function hostRelic(kind, id, playerId) {
+  const t = run.interact.terminals.find((x) => x.id === id);
+  const send = (payload) => { if (isNet()) session.net.broadcast(MSG.RELIC, payload, true); };
+
+  if (kind === 'solved') {
+    if (!t || t.solved) return;
+    applyRelic('solved', id);
+    send({ n: 'solved', id });
+  } else if (kind === 'taken') {
+    if (!t || !t.solved || t.taken) return;
+    applyRelic('taken', id, playerId);
+    send({ n: 'taken', id, i: rosterIndex(playerId) });
+  } else if (kind === 'placed') {
+    const slot = run.interact.firstEmptyHolder;
+    if (slot < 0) return;
+    applyRelic('placed', id, playerId, slot);
+    send({ n: 'placed', id, i: rosterIndex(playerId), slot });
+  }
+}
+
+function applyRelic(kind, id, playerId, slot) {
+  const t = run.interact.terminals.find((x) => x.id === id);
+  if (kind === 'solved') {
+    run.interact.setTerminalSolved(id);
+    audio.pickup(120);
+  } else if (kind === 'taken') {
+    run.interact.setRelicTaken(id);
+    if (playerId === session.localId && t) {
+      run.carrying = { id, name: t.name };
+      el.carrying.classList.remove('hidden');
+      el.carryingName.textContent = t.name;
+      audio.pickup(90);
+    }
+  } else if (kind === 'placed') {
+    run.interact.setHolder(slot, id);
+    el.doorCount.textContent = `${run.interact.filledHolders}/${run.interact.holders.length}`;
+    el.door.classList.toggle('open', run.interact.doorOpen);
+    if (playerId === session.localId) {
+      run.carrying = null;
+      el.carrying.classList.add('hidden');
+    }
+    audio.pickup(200);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Host authority
+// ---------------------------------------------------------------------------
+
+function hostKnockDown(playerId) {
+  if (!run || run.over || !isHost()) return;
+  const target = allPlayers().find((p) => p.id === playerId);
+  if (!target || target.downed || target.dead) return;
+  // Just revived. Without this the ghost standing over the body knocks them
+  // straight back down and the ad bought nothing.
+  if ((target.invulnUntil ?? 0) > run.time) return;
+
+  const lo = run.loadouts.get(playerId);
+  if (lo?.absorbHit()) {
+    // The Warden ate it. Tell them so, and nobody else needs to know.
+    if (playerId === session.localId) audio.hit();
+    else if (isNet()) session.net.send(playerId, MSG.DOWN, { i: rosterIndex(playerId), brace: true }, true);
+    return;
+  }
+
+  target.downed = true;
+  run.downTimers.set(playerId, 26 * (lo?.stats.bleedScale ?? 1));
+  if (isNet()) session.net.broadcast(MSG.DOWN, { i: rosterIndex(playerId), dead: false }, true);
+  if (playerId === session.localId) applyDownLocal();
+}
+
+function hostKill(playerId) {
+  const target = allPlayers().find((p) => p.id === playerId);
+  if (!target) return;
+  target.dead = true;
+  target.downed = false;
+  run.downTimers.delete(playerId);
+  if (isNet()) session.net.broadcast(MSG.DOWN, { i: rosterIndex(playerId), dead: true }, true);
+  if (playerId === session.localId) applyDeadLocal();
+}
+
+function hostRevive(playerId, immunity = 0) {
+  const target = allPlayers().find((p) => p.id === playerId);
+  if (!target || !target.downed || target.dead) return;
+  target.downed = false;
+  target.invulnUntil = run.time + immunity;
+  run.downTimers.delete(playerId);
+  if (isNet()) session.net.broadcast(MSG.REVIVE, { i: rosterIndex(playerId) }, true);
+  if (playerId === session.localId) applyReviveLocal();
+}
+
+function applyDownLocal() {
+  run.player.downed = true;
+  // Being knocked out has to interrupt whatever screen you were sitting at.
+  // Without this the puzzle stays open and you keep solving it from the floor,
+  // which is exactly what happened on the Brass key terminal.
+  if (run.minigame) { run.minigame.controller.abort?.(); closeTerminal(); }
+  if (run.boardOpen) closeBoard();
+  audio.hit();
+  el.downed.classList.remove('hidden');
+  refreshAdRevive();
+  const canSelfRevive = run.loadout.char.id === 'nurse' && run.loadout.ready;
+  el.downedNote.textContent = canSelfRevive
+    ? `You can still get yourself up. ${keyLabel(settings.data.binds.power)}.`
+    : isNet() ? 'Someone has to come and pick you up.'
+              : 'No one is coming for you. Alone, this is how it ends.';
+}
+
+function applyDeadLocal() {
+  run.player.dead = true;
+  run.player.downed = true;
+  if (run.minigame) { run.minigame.controller.abort?.(); closeTerminal(); }
+  if (run.boardOpen) closeBoard();
+  el.downedTimer.textContent = '0';
+  el.downedNote.textContent = 'You bled out. Watch the rest of it.';
+}
+
+function applyReviveLocal() {
+  run.player.downed = false;
+  el.downed.classList.add('hidden');
+}
+
+// ---------------------------------------------------------------------------
+// Ads: buying your way back up
+// ---------------------------------------------------------------------------
+
+function refreshAdRevive() {
+  const left = AD_CONFIG.selfRevivesPerRun - (run?.adRevives ?? 0);
+  const usable = adsEnabled() && left > 0 && run?.player.downed && !run.player.dead;
+  el.adRevive.classList.toggle('hidden', !usable);
+  el.adReviveNote.textContent = usable
+    ? `${left} of ${AD_CONFIG.selfRevivesPerRun} left this run`
+    : '';
+}
+
+el.adRevive.addEventListener('click', async () => {
+  if (!run || !run.player.downed || run.player.dead) return;
+  if ((run.adRevives ?? 0) >= AD_CONFIG.selfRevivesPerRun) return;
+  el.adRevive.disabled = true;
+  const result = await playAd('self-revive', 'Getting you back up');
+  el.adRevive.disabled = false;
+  if (result !== 'viewed') return;
+  run.adRevives = (run.adRevives ?? 0) + 1;
+  if (isHost()) hostRevive(session.localId, AD_CONFIG.immunitySeconds);
+  else session.net.toHost(MSG.REVIVE, { i: rosterIndex(session.localId), ad: true }, true);
+  refreshAdRevive();
+});
+
+// ---------------------------------------------------------------------------
+// Last stand: everyone is down
+// ---------------------------------------------------------------------------
+
+function hostOpenVote() {
+  if (run.vote) return;
+  run.vote = { agreed: new Set(), until: run.time + AD_CONFIG.voteSeconds };
+  if (isNet()) session.net.broadcast(MSG.VOTE, { n: 'open', t: AD_CONFIG.voteSeconds }, true);
+  openVoteUI();
+}
+
+function openVoteUI() {
+  if (!adsEnabled()) { if (isHost()) hostCloseVote(false); return; }
+  el.vote.classList.remove('hidden');
+  el.voteWatch.disabled = false;
+  renderVote();
+}
+
+function renderVote() {
+  el.voteList.innerHTML = '';
+  const agreed = run.vote?.agreed ?? new Set();
+  for (const pl of allPlayers()) {
+    const row = document.createElement('div');
+    row.className = 'vote-row' + (agreed.has(pl.id) ? ' yes' : '');
+    const n = document.createElement('span');
+    n.textContent = (pl.name ?? '?') + (pl.isLocal ? ' (you)' : '');
+    const t = document.createElement('b');
+    t.textContent = agreed.has(pl.id) ? 'watched' : 'waiting';
+    row.append(n, t);
+    el.voteList.appendChild(row);
+  }
+}
+
+function hostRecordVote(playerId) {
+  if (!run.vote) return;
+  run.vote.agreed.add(playerId);
+  if (isNet()) {
+    session.net.broadcast(MSG.VOTE, {
+      n: 'tally', ids: [...run.vote.agreed].map(rosterIndex),
+    }, true);
+  }
+  renderVote();
+  // Everyone, or nobody. One person paying for five is not a group decision.
+  if (allPlayers().every((pl) => run.vote.agreed.has(pl.id))) hostCloseVote(true);
+}
+
+function hostCloseVote(revive) {
+  if (!run.vote) return;
+  run.vote = null;
+  if (isNet()) session.net.broadcast(MSG.VOTE, { n: revive ? 'go' : 'end' }, true);
+  revive ? applyGroupRevive() : endRun(false);
+}
+
+function applyGroupRevive() {
+  el.vote.classList.add('hidden');
+  for (const pl of allPlayers()) {
+    pl.dead = false;
+    pl.downed = false;
+    pl.invulnUntil = run.time + AD_CONFIG.immunitySeconds;
+    run.downTimers.delete(pl.id);
+  }
+  run.player.dead = false;
+  run.player.downed = false;
+  el.downed.classList.add('hidden');
+  audio.escape();
+}
+
+el.voteWatch.addEventListener('click', async () => {
+  el.voteWatch.disabled = true;
+  const result = await playAd('group-revive', 'Bringing everyone back');
+  if (result !== 'viewed') { el.voteWatch.disabled = false; return; }
+  if (isHost()) hostRecordVote(session.localId);
+  else session.net.toHost(MSG.VOTE, { n: 'yes' }, true);
+});
+
+el.voteQuit.addEventListener('click', () => {
+  el.vote.classList.add('hidden');
+  if (isHost()) hostCloseVote(false);
+  else session.net.toHost(MSG.VOTE, { n: 'no' }, true);
+});
+
+// ---------------------------------------------------------------------------
+// Outcomes
+// ---------------------------------------------------------------------------
+
+function endRun(escaped, remoteElapsed) {
+  if (!run || run.over) return;
+  run.over = true;
+  for (const g of run.ghosts) g.clearKnives();
+  audio.silence();
+  escaped ? audio.escape() : audio.caught();
+  document.exitPointerLock?.();
+  el.downed.classList.add('hidden');
+  el.revive.classList.add('hidden');
+  voice.setTalking(false);
+
+  if (isHost() && isNet()) {
+    session.net.broadcast(MSG.END, { escaped, elapsed: Math.round(run.elapsed) }, true);
+  }
+
+  const elapsed = remoteElapsed ?? run.elapsed;
+  const d = run.difficulty;
+  const rows = [];
+  let total = 0;
+  const gotOut = escaped && !run.player.dead;
+
+  if (gotOut) {
+    total += d.payoutBase;
+    rows.push([`Escaped · ${d.label}`, d.payoutBase]);
+    const lootValue = run.carried.reduce((s, l) => s + l.value, 0);
+    const scaled = Math.round(lootValue * d.payoutMultiplier);
+    if (run.carried.length) {
+      rows.push([`${run.carried.length} item${run.carried.length > 1 ? 's' : ''} recovered · ×${d.payoutMultiplier}`, scaled]);
+      total += scaled;
+    }
+    const par = run.level.parSeconds ?? d.parSeconds;
+    const spare = Math.max(0, par - elapsed);
+    const speed = Math.round(spare * 0.7 * d.payoutMultiplier);
+    if (speed > 0) { rows.push([`${formatTime(spare)} under par`, speed]); total += speed; }
+  } else if (escaped) {
+    rows.push(['The others got out. You did not.', 0]);
+  } else {
+    rows.push(['Lights out. Everything stays in the house.', 0]);
+  }
+
+  el.endTitle.textContent = gotOut ? 'Out' : 'Taken';
+  el.endBody.textContent = `${formatTime(elapsed)} inside.` +
+    (run.carried.length && !gotOut ? ` ${run.carried.length} item${run.carried.length === 1 ? '' : 's'} lost with you.` : '');
+
+  el.endRows.innerHTML = '';
+  for (const [label, value] of rows) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const a = document.createElement('span'); a.textContent = label;
+    const b = document.createElement('span'); b.textContent = `${value > 0 ? '+' : ''}${value}`;
+    row.append(a, b);
+    el.endRows.appendChild(row);
+  }
+  el.endTotal.textContent = String(total);
+  Bank.write(Bank.read() + total);
+  el.again.classList.toggle('hidden', isNet() && !isHost());
+  show('end');
+}
+
+const formatTime = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+// ---------------------------------------------------------------------------
+// Loop
+// ---------------------------------------------------------------------------
+
+const STEP = 1 / 60;
+const SEND_HZ = 20;
+const SNAP_HZ = 15;
+let accumulator = 0;
+let lastFrame = 0;
+let fpsAccum = 0, fpsFrames = 0;
+
+const flashDir = new THREE.Vector3(0, 0, -1);
+const targetDir = new THREE.Vector3();
+
+function frame(now) {
+  rafId = requestAnimationFrame(frame);
+  if (!run) return;
+
+  const dt = Math.min((now - lastFrame) / 1000, 0.1);
+  lastFrame = now;
+  run.time += dt;
+
+  if (!run.over && run.begun) {
+    accumulator += dt;
+    let steps = 0;
+    while (accumulator >= STEP && steps < 5) {
+      // A terminal takes both hands. Without this the movement keys still
+      // reach the window listener and you walk off while the puzzle is open.
+      // A terminal takes both hands, and so does a piece of chalk. Without
+      // this the movement keys still reach the window listener and you walk
+      // off while the panel is open.
+      if (!run.minigame && !run.boardOpen) run.player.update(STEP, run.grid, run.time);
+      if (isHost()) for (const g of run.ghosts) g.update(STEP, allPlayers(), run.grid, run.time);
+      accumulator -= STEP;
+      steps++;
+    }
+    if (!run.player.downed) run.elapsed += dt;
+  }
+
+  // Ghost meshes bypass frustum culling so their shader wobble is never
+  // clipped mid-vertex. With one per seven rooms that is up to 28 additive,
+  // depth-writing-off draws every frame, most of them behind walls in fog.
+  // A distance test costs nothing and removes nearly all of them.
+  const far2 = CONFIG.drawDistance * CONFIG.drawDistance;
+  for (const g of run.ghosts) {
+    const dx = g.pos.x - camera.position.x, dz = g.pos.z - camera.position.z;
+    g.mesh.visible = dx * dx + dz * dz < far2;
+  }
+
+  for (const r of run.remotes.values()) r.update(now);
+  if (!isHost()) for (const g of run.ghosts) g.updateVisualsOnly(dt, run.grid, run.time);
+  if (!run.over && run.begun) simulate(dt);
+  if (isNet()) network(dt);
+
+  camera.getWorldDirection(targetDir);
+  flashDir.lerp(targetDir, 1 - Math.exp(-14 * dt)).normalize();
+  run.material.uniforms.uFlashPos.value.copy(camera.position);
+  run.material.uniforms.uFlashDir.value.copy(flashDir);
+  // Failing bulbs. Baked into their own channels, modulated live here.
+  const u = run.material.uniforms;
+  u.uFlickerA.value = flickerSignal(run.time, 0.0);
+  u.uFlickerB.value = flickerSignal(run.time, 2.7);
+
+  // The torch stutters when the ghost is close. It is atmosphere, but it is
+  // also the only warning you get when it is behind you.
+  const near = Math.max(0, 1 - nearestGhostDistance() / 12);
+  u.uFlashFlicker.value = near > 0.05
+    ? 1 - near * 0.55 * (0.5 + 0.5 * Math.sin(run.time * 33 + Math.sin(run.time * 7) * 3))
+    : 1;
+
+  run.lootMat.uniforms.uTime.value = run.time;
+  run.beadMat.uniforms.uTime.value = run.time;
+  run.exitMat.uniforms.uTime.value = run.time;
+  run.trapMat.uniforms.uTime.value = run.time;
+
+  if (run.vis.update(run.player.pos.x, run.player.pos.z)) el.room.textContent = run.vis.roomName;
+  renderer.render(run.scene, camera);
+
+  fpsAccum += dt; fpsFrames++;
+  if (fpsAccum >= 0.4) {
+    el.fps.textContent = Math.round(fpsFrames / fpsAccum);
+    el.drawn.textContent = run.vis.drawn;
+    el.calls.textContent = renderer.info.render.calls;
+    el.tris.textContent = renderer.info.render.triangles.toLocaleString();
+    el.timer.textContent = formatTime(run.elapsed);
+    el.net.textContent = isNet() ? `${session.mode} · ${run.remotes.size + 1} in` : 'solo';
+    fpsAccum = 0; fpsFrames = 0;
+    updateTeamPanel();
+  }
+}
+
+function simulate(dt) {
+  const p = run.player;
+  const lo = run.loadout;
+  lo.tick(dt);
+
+  // Ability upkeep.
+  if (!lo.isActive && lo.char.id === 'runner') p.speedScale = lo.stats.sprintScale;
+  if (run.flare.visible && run.time > run.flareUntil) {
+    run.flare.visible = false;
+    run.material.uniforms.uFlareOn.value = 0;
+  }
+  for (const pl of allPlayers()) {
+    // A closet hides you from every sense it has. That is the whole point of
+    // one, and it has to apply to remote players on the host too, not just to
+    // whoever is looking at their own screen.
+    pl.undetectable = pl.undetectableUntil > run.time || !!pl.hidingClosetId;
+  }
+
+  el.powerFill.style.width = lo.char.cooldown
+    ? `${100 * (1 - lo.cooldown / lo.char.cooldown)}%`
+    : (lo.ready ? '100%' : '0%');
+  el.power.classList.toggle('ready', lo.ready);
+  el.power.classList.toggle('active', lo.isActive);
+
+  // Push to talk.
+  if (voice.enabled) {
+    const talking = settings.data.voice.pushToTalk ? p.held('talk') : true;
+    if (talking !== voice.talking) voice.setTalking(talking);
+    el.talk.classList.toggle('hidden', !(talking && !voice.muted));
+  }
+
+  if (isHost() && run.vote) {
+    el.voteTimer.textContent = Math.ceil(Math.max(0, run.vote.until - run.time));
+    if (run.time > run.vote.until) hostCloseVote(false);
+    return;      // nothing else moves while the house waits on the answer
+  }
+
+  if (isHost()) {
+    for (const [id, t] of run.downTimers) {
+      const left = t - dt;
+      if (left <= 0) hostKill(id);
+      else run.downTimers.set(id, left);
+    }
+    for (const g of run.ghosts) {
+      const touched = g.checkContact(allPlayers());
+      if (touched) { hostKnockDown(touched); break; }
+    }
+    hostCheckTraps();
+    checkEscape();
+  }
+
+  if (p.downed && !p.dead) {
+    const left = run.downTimers.get(p.id);
+    if (left !== undefined) el.downedTimer.textContent = Math.ceil(Math.max(0, left));
+  }
+
+  // -- hiding, and what is in reach ---------------------------------------
+
+  if (p.hiding || p.downed || p.dead || run.minigame || run.boardOpen) {
+    el.use.classList.add('hidden');
+    run.useTarget = null;
+  } else {
+    run.useTarget = run.interact.nearest(p.pos, { carrying: run.carrying, canHide: true });
+    const busy = !!reviveCandidate(p.pos, [...run.remotes.values()]);
+    const showUse = run.useTarget && !busy;
+    el.use.classList.toggle('hidden', !showUse);
+    if (showUse) el.useLabel.textContent = run.useTarget.label;
+  }
+
+  run.interact.update(dt, run.time);
+  ghostFootsteps(dt);
+
+  // A screen that is on is telling the house where you are. Every few seconds
+  // it calls again, so a long puzzle is a long invitation.
+  if (isHost()) {
+    for (const [, t] of run.busyTerminals) {
+      t.next -= dt;
+      if (t.next <= 0) {
+        t.next = 3.0;
+        for (const g of run.ghosts) {
+          if (Math.hypot(g.pos.x - t.x, g.pos.z - t.z) < 45) g.lure(t.x, t.z);
+        }
+      }
+    }
+  }
+
+  // The noise, heard locally. Driven separately from the lure above because a
+  // client running a terminal must hear its own racket even though the host is
+  // the one moving the ghosts.
+  if (run.minigame) {
+    run.noiseTimer = (run.noiseTimer ?? 0) - dt;
+    if (run.noiseTimer <= 0) { run.noiseTimer = 1.5; audio.terminalNoise(); }
+  } else {
+    run.noiseTimer = 0;
+  }
+
+  // Your microphone, as the ghosts hear it.
+  if (voice.enabled) {
+    p.voiceLevel = voice.sampleLevel();
+  } else {
+    p.voiceLevel = 0;
+  }
+
+  // -- reviving ------------------------------------------------------------
+
+  if (!p.downed && !p.dead) {
+    const cand = reviveCandidate(p.pos, [...run.remotes.values()]);
+    if (cand) {
+      const needed = REVIVE_SECONDS * lo.stats.reviveScale;
+      el.revive.classList.remove('hidden');
+      el.reviveName.textContent = cand.name;
+      if (p.held('interact')) {
+        if (run.reviveTarget !== cand.id) { run.reviveTarget = cand.id; run.reviveProgress = 0; }
+        run.reviveProgress += dt;
+        if (run.reviveProgress >= needed) {
+          run.reviveProgress = 0;
+          if (isHost()) hostRevive(cand.id);
+          else session.net.toHost(MSG.REVIVE, { i: rosterIndex(cand.id) }, true);
+        }
+      } else {
+        run.reviveProgress = Math.max(0, run.reviveProgress - dt * 2);
+      }
+      el.reviveBar.style.width = `${(run.reviveProgress / needed) * 100}%`;
+    } else {
+      el.revive.classList.add('hidden');
+      run.reviveProgress = 0;
+      run.reviveTarget = null;
+    }
+  } else {
+    el.revive.classList.add('hidden');
+  }
+
+  // -- loot ----------------------------------------------------------------
+
+  const senseAll = run.time < run.senseUntil;
+  const senseRadius = lo.stats.lootSense;
+  run.exitBead.visible = senseAll;
+
+  for (const l of run.lootItems) {
+    if (l.taken) { l.bead.visible = false; continue; }
+    const dx = l.x - p.pos.x, dz = l.z - p.pos.z;
+    const d2 = dx * dx + dz * dz;
+
+    if (!p.downed && !p.dead && d2 < 1.4 * 1.4) {
+      if (isHost()) { hostGrantLoot(l.uid, session.localId); continue; }
+      if (!l.claimedAt || run.time - l.claimedAt > 2) {
+        l.claimedAt = run.time;
+        session.net.toHost(MSG.PICKUP, { uid: l.uid }, true);
+      }
+    }
+    l.bead.visible = senseAll || (senseRadius > 0 && d2 < senseRadius * senseRadius);
+    l.mesh.rotation.y += dt * 1.4;
+    l.mesh.position.y = 0.85 + Math.sin(run.time * 2 + l.x) * 0.07;
+  }
+
+  if (!p.downed && !p.dead) {
+    // The player makes no footstep sound at all. Every creak you hear in here
+    // is something else walking, which is the entire point of the cue.
+  }
+  run.pillar.rotation.y += dt * 0.4;
+
+  const d = nearestGhostDistance();
+  const proximity = Math.max(0, 1 - d / 22);
+  const hunting = anyHunting();
+  audio.setTension(proximity, hunting);
+  el.vignette.style.opacity = String(Math.min(0.85, hunting ? proximity * 1.3 : proximity * 0.35));
+}
+
+/**
+ * A snare does not knock you down. It pins you for a few seconds and makes
+ * enough noise to bring the ghost — which is worse, because now you are the
+ * one standing still.
+ */
+function hostCheckTraps() {
+  for (let i = 0; i < run.traps.length; i++) {
+    const t = run.traps[i];
+    if (!t.armed) continue;
+    for (const pl of allPlayers()) {
+      if (pl.downed || pl.dead) continue;
+      const dx = pl.pos.x - t.x, dz = pl.pos.z - t.z;
+      if (dx * dx + dz * dz > 0.85 * 0.85) continue;
+      applyTrapHit(i, pl.id);
+      if (isNet()) {
+        session.net.broadcast(MSG.TRAP, { n: 'hit', i, p: rosterIndex(pl.id) }, true);
+      }
+      return;
+    }
+  }
+}
+
+function applyTrapHit(index, playerId) {
+  const t = run.traps[index];
+  if (!t || !t.armed) return;
+  t.armed = false;
+  t.mesh.visible = false;
+  // Every ghost hears it, not just the one that left it. That is the point:
+  // a snare is loud, and there are three of them now.
+  if (isHost()) for (const g of run.ghosts) g.lure(t.x, t.z);
+  if (playerId === session.localId) {
+    run.player.snaredUntil = run.time + 2.6;
+    audio.hit();
+  }
+}
+
+function hostGrantLoot(uid, ownerId) {
+  const l = run.lootItems.find((x) => x.uid === uid);
+  if (!l || l.owner) return;
+  l.owner = ownerId;
+  l.taken = true;
+  l.mesh.visible = false;
+  l.bead.visible = false;
+  if (isNet()) session.net.broadcast(MSG.PICKUP, { uid, i: rosterIndex(ownerId) }, true);
+  if (ownerId === session.localId) claimLoot(l);
+}
+
+function claimLoot(l) {
+  run.carried.push(l);
+  audio.pickup(l.value);
+  const worth = run.carried.reduce((s, i) => s + i.value, 0);
+  el.carry.textContent = `${run.carried.length} · ${worth}`;
+}
+
+function checkEscape() {
+  const live = livePlayers();
+  if (!live.length) {
+    // Not over yet: offer the group a way back before taking the run away.
+    adsEnabled() ? hostOpenVote() : endRun(false);
+    return;
+  }
+  if (live.some((pl) => pl.downed)) return;
+  // The door does not open on arrival. It opens when its four holders are full.
+  if (!run.interact.doorOpen) return;
+  const r = run.exitRoom;
+  const inside = live.filter((pl) =>
+    pl.pos.x > r.x0 && pl.pos.x < r.x1 && pl.pos.z > r.z0 && pl.pos.z < r.z1);
+  run.atExit = `${inside.length}/${live.length}`;
+  if (inside.length === live.length) endRun(true);
+}
+
+function updateTeamPanel() {
+  // Top left, always visible, so you can see at a glance who is still standing
+  // without waiting for someone to say so on voice.
+  el.rosterHud.innerHTML = '';
+  for (const pl of allPlayers()) {
+    const state = pl.dead ? 'gone' : pl.downed ? 'down' : 'up';
+    const row = document.createElement('div');
+    row.className = `rh ${state}`;
+    const dot = document.createElement('i');
+    dot.style.background = `#${(pl.color ?? 0xcfc4b4).toString(16).padStart(6, '0')}`;
+    const name = document.createElement('span');
+    name.textContent = (pl.name ?? '?') + (pl.isLocal ? ' (you)' : '');
+    const tag = document.createElement('b');
+    tag.textContent = pl.dead ? 'gone' : pl.downed ? 'down' : '';
+    row.append(dot, name, tag);
+    el.rosterHud.appendChild(row);
+  }
+
+  el.team.textContent = '';
+  if (run.atExit) {
+    const span = document.createElement('span');
+    span.className = 'tp exit';
+    span.textContent = `${run.atExit} at the way out`;
+    el.team.appendChild(span);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Networking per frame
+// ---------------------------------------------------------------------------
+
+function network(dt) {
+  const net = session.net;
+  if (!net) return;
+
+  run.sendAcc += dt;
+  if (!isHost() && run.sendAcc >= 1 / SEND_HZ) {
+    run.sendAcc = 0;
+    const p = run.player;
+    net.toHost(MSG.STATE, {
+      x: r2(p.pos.x), z: r2(p.pos.z), y: r2(p.yaw),
+      f: (p.downed ? 1 : 0) | (p.dead ? 2 : 0) | (p.crouching ? 4 : 0),
+      v: Math.round((p.voiceLevel ?? 0) * 100),
+    }, false);
+  }
+
+  run.snapAcc += dt;
+  if (isHost() && run.snapAcc >= 1 / SNAP_HZ) {
+    run.snapAcc = 0;
+    const players = allPlayers().map((pl) => [
+      rosterIndex(pl.id), r2(pl.pos.x), r2(pl.pos.z), r2(pl.yaw),
+      (pl.downed ? 1 : 0) | (pl.dead ? 2 : 0) | (pl.crouching ? 4 : 0),
+    ]);
+    net.broadcast(MSG.SNAP, {
+      p: players,
+      g: run.ghosts.map((gh) => [
+        r2(gh.pos.x), r2(gh.pos.z), r2(gh.mesh.rotation.y), r2(gh.rage), gh.state,
+      ]),
+      e: Math.round(run.elapsed),
+      a: run.atExit ?? null,
+    }, false);
+  }
+
+  if (voice.enabled) {
+    voice.setListener(camera);
+    for (const r of run.remotes.values()) {
+      voice.setPosition(r.id, r.pos.x, 1.4, r.pos.z);
+      voice.setVolume(r.id, r.downed ? 0.55 : 1.0);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Message wiring
+// ---------------------------------------------------------------------------
+
+function wireNet(net) {
+  net.on('joined', ({ id, name }) => {
+    if (!isHost()) return;
+    if (session.roster.length >= 6) { net.send(id, MSG.END, { full: true }, true); return; }
+    if (!session.roster.some((p) => p.id === id)) {
+      session.roster.push({ id, name, ready: false, char: DEFAULT_CHARACTER });
+    }
+    broadcastLobby();
+    voice.callAll(net.peer, [...net.conns.keys()]);
+  });
+
+  net.on('left', ({ id }) => {
+    voice.drop(id);
+    if (isHost()) {
+      session.roster = session.roster.filter((p) => p.id !== id);
+      broadcastLobby();
+    }
+    if (run) {
+      const r = run.remotes.get(id);
+      if (r) { r.dispose(run.scene); run.remotes.delete(id); }
+      run.downTimers.delete(id);
+    }
+    if (currentScreen === 'select') renderSelect();
+  });
+
+  net.on(MSG.HELLO, ({ name }, from) => {
+    if (!isHost()) return;
+    const entry = session.roster.find((p) => p.id === from);
+    if (entry) entry.name = name;
+    else session.roster.push({ id: from, name, ready: false, char: DEFAULT_CHARACTER });
+    broadcastLobby();
+  });
+
+  net.on(MSG.LOBBY, ({ roster, difficultyId }) => {
+    session.roster = roster;
+    session.difficultyId = difficultyId;
+    const me = meInRoster();
+    if (me) { session.character = me.char ?? session.character; session.ready = !!me.ready; }
+    if (currentScreen === 'select' || currentScreen === 'multiplayer') renderSelect();
+    voice.callAll(net.peer, roster.map((p) => p.id).filter((id) => id !== net.id));
+  });
+
+  net.on(MSG.CHAR, ({ char, ready }, from) => {
+    if (!isHost()) return;
+    const entry = session.roster.find((p) => p.id === from);
+    if (!entry) return;
+    if (char) entry.char = char;
+    if (ready !== undefined) entry.ready = ready;
+    broadcastLobby();
+  });
+
+  net.on(MSG.START, ({ difficultyId, seed }) => {
+    if (isHost()) return;
+    startRun(difficultyById(difficultyId), seed);
+  });
+
+  net.on(MSG.LOADED, (_, from) => { if (isHost()) hostMarkLoaded(from); });
+  net.on(MSG.BEGIN, () => { if (run) run.begun = true; });
+
+  net.on(MSG.STATE, (d, from) => {
+    if (!isHost() || !run) return;
+    const rp = run.remotes.get(from);
+    if (!rp) return;
+    rp.push(d.x, d.z, d.y, !!(d.f & 1), !!(d.f & 2), performance.now(), !!(d.f & 4));
+    // Applied directly rather than buffered: the ghost reacts to how loud you
+    // are now, and an eighth of a second of smoothing would only blur it.
+    rp.voiceLevel = (d.v ?? 0) / 100;
+  });
+
+  net.on(MSG.SNAP, (d) => {
+    if (isHost() || !run) return;
+    const now = performance.now();
+    for (const [idx, x, z, yaw, f] of d.p) {
+      const entry = session.roster[idx];
+      if (!entry || entry.id === session.localId) continue;
+      run.remotes.get(entry.id)?.push(x, z, yaw, !!(f & 1), !!(f & 2), now, !!(f & 4));
+    }
+    for (let i = 0; i < d.g.length && i < run.ghosts.length; i++) {
+      const gs = d.g[i];
+      run.ghosts[i].applySnapshot(gs[0], gs[1], gs[2], gs[3], gs[4]);
+    }
+    run.elapsed = d.e;
+    run.atExit = d.a;
+  });
+
+  net.on(MSG.KNIFE, (d) => {
+    if (isHost() || !run) return;
+    (run.ghosts[d.gi ?? 0] ?? run.ghosts[0])?.addKnife(d.x, d.z, d.dx, d.dz);
+  });
+
+  net.on(MSG.HIDE, (d, from) => {
+    if (!run) return;
+    if (isHost()) { hostSetHide(d.c, d.on ? from : null); return; }
+    applyHide(d.c, d.i === null || d.i === undefined ? null : session.roster[d.i]?.id ?? null);
+  });
+
+  net.on(MSG.RELIC, (d, from) => {
+    if (!run) return;
+    if (d.n === 'busy') {
+      run.interact.setTerminalBusy(d.id, d.on);
+      if (isHost()) {
+        const t = run.interact.terminals.find((x) => x.id === d.id);
+        if (d.on && t) run.busyTerminals.set(d.id, { x: t.x, z: t.z, next: 0 });
+        else run.busyTerminals.delete(d.id);
+        session.net.broadcast(MSG.RELIC, d, true, from);
+      }
+      return;
+    }
+    if (isHost()) { hostRelic(d.n, d.id, from); return; }
+    applyRelic(d.n, d.id, session.roster[d.i]?.id, d.slot);
+  });
+
+  net.on(MSG.VOTE, (d, from) => {
+    if (!run) return;
+    if (isHost()) {
+      if (d.n === 'yes') hostRecordVote(from);
+      else if (d.n === 'no') hostCloseVote(false);
+      return;
+    }
+    if (d.n === 'open') { run.vote = { agreed: new Set(), until: run.time + d.t }; openVoteUI(); }
+    else if (d.n === 'tally') {
+      if (!run.vote) return;
+      run.vote.agreed = new Set(d.ids.map((i) => session.roster[i]?.id).filter(Boolean));
+      renderVote();
+    } else if (d.n === 'go') { run.vote = null; applyGroupRevive(); }
+    else if (d.n === 'end') { run.vote = null; el.vote.classList.add('hidden'); }
+  });
+
+  net.on(MSG.BOARD, (d, from) => {
+    if (!run) return;
+    run.interact.applyBoardStroke(d.b, d.s);
+    // The host relays so a client's chalk reaches everyone, not only the host.
+    if (isHost()) session.net.broadcast(MSG.BOARD, d, true, from);
+    if (run.boardOpen === d.b) run.boardEditor?.refresh();
+  });
+
+  net.on(MSG.TRAP, (d) => {
+    if (isHost() || !run) return;
+    if (d.n === 'add') { addTrap(d.x, d.z); return; }
+    applyTrapHit(d.i, session.roster[d.p]?.id);
+  });
+
+  net.on(MSG.POWER, (d, from) => {
+    if (!run) return;
+    const ownerId = session.roster[d.i]?.id ?? from;
+    if (ownerId === session.localId) return;   // already applied locally
+    applyPower(d.c, d.x, d.z, ownerId);
+    if (isHost()) session.net.broadcast(MSG.POWER, d, true, from);
+  });
+
+  net.on(MSG.PICKUP, (d, from) => {
+    if (!run) return;
+    if (isHost()) { hostGrantLoot(d.uid, from); return; }
+    const l = run.lootItems.find((x) => x.uid === d.uid);
+    if (!l) return;
+    l.taken = true;
+    l.mesh.visible = false;
+    l.bead.visible = false;
+    if (session.roster[d.i]?.id === session.localId) claimLoot(l);
+  });
+
+  net.on(MSG.DOWN, (d) => {
+    if (isHost() || !run) return;
+    if (d.brace) { audio.hit(); return; }
+    const id = session.roster[d.i]?.id;
+    if (!id) return;
+    const target = allPlayers().find((p) => p.id === id);
+    if (target) { target.downed = !d.dead; target.dead = d.dead; }
+    if (id === session.localId) d.dead ? applyDeadLocal() : applyDownLocal();
+    if (!d.dead) run.downTimers.set(id, 26);
+  });
+
+  net.on(MSG.REVIVE, (d, from) => {
+    if (!run) return;
+    const id = session.roster[d.i]?.id;
+    if (!id) return;
+    if (isHost()) {
+      const reviver = allPlayers().find((p) => p.id === from);
+      const target = allPlayers().find((p) => p.id === id);
+      if (!reviver || !target || !target.downed) return;
+      // An ad revive is bought by the downed player themselves, so it has no
+      // reviver to stand next to.
+      if (d.ad) { hostRevive(id, AD_CONFIG.immunitySeconds); return; }
+      if (Math.hypot(reviver.pos.x - target.pos.x, reviver.pos.z - target.pos.z) > 3.5) return;
+      hostRevive(id);
+      return;
+    }
+    const target = allPlayers().find((p) => p.id === id);
+    if (target) target.downed = false;
+    run.downTimers.delete(id);
+    if (id === session.localId) applyReviveLocal();
+  });
+
+  net.on(MSG.END, (d) => {
+    if (d.full) { showMenuError('That house already has six people in it.'); return; }
+    if (!isHost()) endRun(d.escaped, d.elapsed);
+  });
+
+  net.on('call', (call) => voice.accept(call));
+  net.on('error', (err) => showMenuError(err?.message ?? 'Connection lost.'));
+}
+
+function hostMarkLoaded(id) {
+  const entry = session.roster.find((p) => p.id === id);
+  if (entry) entry.loaded = true;
+  if (session.roster.every((p) => p.loaded)) {
+    session.net?.broadcast(MSG.BEGIN, {}, true);
+    if (run) run.begun = true;
+    for (const p of session.roster) p.loaded = false;
+  }
+}
+
+function broadcastLobby() {
+  session.net?.broadcast(MSG.LOBBY, {
+    roster: session.roster.map((p) => ({ id: p.id, name: p.name, ready: p.ready, char: p.char })),
+    difficultyId: session.difficultyId,
+  }, true);
+  if (currentScreen === 'select') renderSelect();
+}
+
+// ---------------------------------------------------------------------------
+// Screens
+// ---------------------------------------------------------------------------
+
+function showMenuError(msg) {
+  el.menuError.textContent = msg;
+  el.menuError.classList.remove('hidden');
+}
+
+function difficultyCard(d, selected) {
+  const card = document.createElement('button');
+  card.className = 'card' + (selected ? ' selected' : '');
+  const n = document.createElement('span'); n.className = 'card-name'; n.textContent = d.label;
+  const b = document.createElement('span'); b.className = 'card-blurb'; b.textContent = d.blurb;
+  const m = document.createElement('span'); m.className = 'card-meta';
+  m.textContent = `${d.grid[0] * d.grid[1]} rooms · ${d.lootCount} things worth taking · pays ×${d.payoutMultiplier}`;
+  card.append(n, b, m);
+  return card;
+}
+
+function renderModes() {
+  el.modeCards.innerHTML = '';
+  for (const d of DIFFICULTIES) {
+    const card = difficultyCard(d, d.id === session.difficultyId);
+    card.addEventListener('click', () => {
+      session.difficultyId = d.id;
+      renderModes();
+      if (isNet() && isHost()) broadcastLobby();
+    });
+    el.modeCards.appendChild(card);
+  }
+  show('modes');
+}
+
+let preview = null;
+
+function renderSelect() {
+  if (!preview) {
+    preview = new CharacterPreview(el.previewCanvas);
+  }
+  const chosen = characterById(session.character);
+  preview.show(chosen);
+
+  el.charName.textContent = chosen.name;
+  el.charTag.textContent = chosen.tag;
+  el.charPassive.textContent = chosen.passive;
+  el.charAbility.textContent = chosen.ability;
+  el.charAbilityText.textContent = chosen.abilityText;
+  el.charKey.textContent = keyLabel(settings.data.binds.power) +
+    (chosen.cooldown ? ` · ${chosen.cooldown}s cooldown` : ' · once per run');
+
+  el.charList.innerHTML = '';
+  for (const c of CHARACTERS) {
+    const b = document.createElement('button');
+    const locked = !owns(c.id);
+    b.className = 'char-chip' + (c.id === session.character ? ' selected' : '') + (locked ? ' locked' : '');
+    b.style.setProperty('--chip', `#${c.color.toString(16).padStart(6, '0')}`);
+    const dot = document.createElement('i');
+    const label = document.createElement('span');
+    label.textContent = c.name.replace(/^The /, '') + (locked ? ' \u2014 locked' : '');
+    b.append(dot, label);
+
+    // Who else is on this character right now.
+    const takers = session.roster.filter((p) => p.char === c.id && p.id !== session.localId);
+    if (takers.length) {
+      const who = document.createElement('em');
+      who.textContent = takers.map((t) => t.name).join(', ');
+      b.appendChild(who);
+    }
+    b.addEventListener('click', () => pickCharacter(c.id));
+    el.charList.appendChild(b);
+  }
+
+  el.houseName.textContent = difficultyById(session.difficultyId).label;
+  el.changeHouse.classList.toggle('hidden', isNet() && !isHost());
+
+  el.roster.innerHTML = '';
+  const list = isNet() ? session.roster : [{ id: 'solo', name: session.name, char: session.character, ready: true }];
+  list.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'player-row' + (p.ready ? ' is-ready' : '');
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.style.background = `#${PLAYER_COLORS[i % PLAYER_COLORS.length].toString(16).padStart(6, '0')}`;
+    const nm = document.createElement('span');
+    nm.textContent = p.name + (p.id === session.localId ? ' (you)' : '');
+    const ch = document.createElement('em');
+    ch.textContent = characterById(p.char ?? DEFAULT_CHARACTER).name.replace(/^The /, '');
+    const st = document.createElement('b');
+    st.textContent = p.ready ? 'ready' : '…';
+    row.append(dot, nm, ch, st);
+    el.roster.appendChild(row);
+  });
+
+  el.codeLine.classList.toggle('hidden', !isNet());
+  el.code.textContent = session.net?.code ?? '—';
+  el.readyBtn.classList.toggle('hidden', !isNet());
+  el.readyBtn.textContent = session.ready ? 'Not ready' : 'Ready';
+  el.startBtn.classList.toggle('hidden', isNet() && !isHost());
+
+  const allReady = !isNet() || session.roster.every((p) => p.ready);
+  el.startBtn.disabled = isNet() && !allReady;
+  el.selectHint.textContent = !isNet()
+    ? 'Pick someone and go in. Drag the figure to look at them.'
+    : isHost() ? (allReady ? 'Everyone is ready.' : 'Waiting for everyone to say ready.')
+               : 'The host decides when you go in.';
+
+  show('select');
+}
+
+function pickCharacter(id) {
+  if (!owns(id)) {
+    el.selectHint.textContent = `${characterById(id).name} is locked \u2014 ${priceOf(id).toLocaleString()} shards in the shop.`;
+    return;
+  }
+  session.character = id;
+  if (isNet()) {
+    const me = meInRoster();
+    if (me) me.char = id;
+    if (isHost()) broadcastLobby();
+    else session.net.toHost(MSG.CHAR, { char: id }, true);
+  }
+  renderSelect();
+}
+
+function closePreview() {
+  preview?.dispose();
+  preview = null;
+}
+
+let shopPreview = null;
+let shopSelected = null;
+
+function renderShop() {
+  el.shopBank.textContent = Bank.read().toLocaleString();
+  shopSelected = shopSelected ?? session.character;
+
+  // The same turntable the character screen uses. Nobody should have to spend
+  // 2,200 shards on a silhouette they have only seen as a coloured dot.
+  if (!shopPreview) shopPreview = new CharacterPreview(el.shopPreview);
+  const shown = characterById(shopSelected);
+  shopPreview.show(shown);
+  el.shopName.textContent = shown.name;
+  el.shopTag.textContent = shown.tag;
+
+  el.shopList.innerHTML = '';
+  for (const c of CHARACTERS) {
+    const owned = owns(c.id);
+    const price = priceOf(c.id);
+    // A div, not a button. Clicking the description should never spend
+    // anything — buying is its own explicit control.
+    const card = document.createElement('div');
+    card.className = 'card shop-card' + (owned ? ' owned' : '')
+      + (c.id === shopSelected ? ' shown' : '');
+    // Clicking the card previews. Buying is the button, and only the button.
+    card.addEventListener('click', () => { shopSelected = c.id; renderShop(); });
+    card.style.setProperty('--chip', `#${c.color.toString(16).padStart(6, '0')}`);
+
+    const text = document.createElement('div');
+    text.className = 'shop-text';
+    const name = document.createElement('span');
+    name.className = 'card-name';
+    name.textContent = c.name;
+    const blurb = document.createElement('span');
+    blurb.className = 'card-blurb';
+    blurb.textContent = `${c.passive} ${c.ability}: ${c.abilityText}`;
+    text.append(name, blurb);
+
+    const side = document.createElement('div');
+    side.className = 'shop-side';
+    const meta = document.createElement('span');
+    meta.className = 'card-meta';
+    meta.textContent = owned
+      ? (price === 0 ? 'free forever' : 'owned')
+      : `${price.toLocaleString()} shards`;
+    side.appendChild(meta);
+
+    if (!owned) {
+      const buyBtn = document.createElement('button');
+      const affordable = Bank.read() >= price;
+      buyBtn.className = 'btn shop-buy' + (affordable ? ' primary' : '');
+      buyBtn.textContent = affordable ? 'Buy' : 'Too few shards';
+      buyBtn.disabled = !affordable;
+      buyBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const result = buy(c.id, Bank);
+        el.shopNote.textContent = result === 'bought'
+          ? `${c.name} is yours.`
+          : `You need ${(price - Bank.read()).toLocaleString()} more.`;
+        if (result === 'bought') session.character = c.id;
+        renderShop();
+        el.bank.textContent = Bank.read().toLocaleString();
+      });
+      side.appendChild(buyBtn);
+    }
+
+    card.append(text, side);
+    el.shopList.appendChild(card);
+  }
+  show('shop');
+}
+
+function refreshAdEarn() {
+  if (!adsEnabled()) { el.adEarn.classList.add('hidden'); return; }
+  el.adEarn.classList.remove('hidden');
+  const left = menuCooldownLeft();
+  el.adEarn.disabled = left > 0;
+  el.adEarnNote.textContent = left > 0
+    ? `${left}s`
+    : `+${AD_CONFIG.menuReward}`;
+}
+
+el.adEarn.addEventListener('click', async () => {
+  if (menuCooldownLeft() > 0) return;
+  el.adEarn.disabled = true;
+  const result = await playAd('menu-earn', 'Earning shards');
+  if (result === 'viewed') {
+    markMenuAdWatched();
+    Bank.write(Bank.read() + AD_CONFIG.menuReward);
+    el.bank.textContent = Bank.read().toLocaleString();
+    if (currentScreen === 'shop') renderShop();
+  }
+  refreshAdEarn();
+});
+
+$('open-shop').addEventListener('click', () => renderShop());
+$('shop-back').addEventListener('click', () => {
+  shopPreview?.dispose();
+  shopPreview = null;
+  buildMenu();
+});
+
+setInterval(() => {
+  if (currentScreen === 'menu' || currentScreen === 'shop') refreshAdEarn();
+}, 1000);
+
+function buildMenu() {
+  disposeRun();
+  closePreview();
+  el.bank.textContent = Bank.read().toLocaleString();
+  el.menuError.classList.add('hidden');
+  refreshAdEarn();
+  show('menu');
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+
+const settingsUI = buildSettingsUI({
+  onChange: () => { applyGraphics(); applyAudio(); if (run) el.promptKeys.innerHTML = promptText(); },
+  onTest: (key) => { audio.resume(); if (key === 'sfx' || key === 'master') audio.pickup(60); },
+});
+
+$('go-solo').addEventListener('click', () => {
+  // Solo has nobody to show a name to, so it is never asked for.
+  session.name = settings.data.name || 'You';
+  session.mode = 'solo';
+  session.localId = 'solo';
+  session.roster = [{ id: 'solo', name: session.name, ready: true, char: session.character }];
+  audio.resume();
+  renderModes();
+});
+
+$('go-multiplayer').addEventListener('click', () => {
+  el.name.value = settings.data.name;
+  el.menuError.classList.add('hidden');
+  show('multiplayer');
+  setTimeout(() => el.name.focus(), 40);
+});
+
+function takeName(fallback) {
+  const v = el.name.value.trim();
+  session.name = v || fallback;
+  settings.data.name = session.name;
+  settings.save();
+  return session.name;
+}
+
+$('open-controls').addEventListener('click', () => { settingsUI.openTab('controls'); show('settings'); });
+$('open-audio').addEventListener('click', () => { settingsUI.openTab('audio'); show('settings'); });
+$('open-graphics').addEventListener('click', () => { settingsUI.openTab('graphics'); show('settings'); });
+$('open-about').addEventListener('click', () => show('about'));
+$('settings-back').addEventListener('click', () => {
+  // The world keeps running behind the settings screen, which is the only
+  // correct behaviour in multiplayer — a pause everyone else does not share
+  // would just be a way to get killed while reading a slider.
+  if (run && !run.over) { show(null); return; }
+  buildMenu();
+});
+$('ingame-settings').addEventListener('click', (e) => {
+  e.stopPropagation();
+  settingsUI.openTab('controls');
+  show('settings');
+});
+$('about-back').addEventListener('click', () => buildMenu());
+$('mp-back').addEventListener('click', () => buildMenu());
+$('modes-back').addEventListener('click', () => (isNet() ? renderSelect() : buildMenu()));
+
+$('exit').addEventListener('click', () => {
+  // A page cannot close itself unless a script opened it, so this is honest
+  // about what it can do rather than silently failing.
+  voice.shutdown();
+  session.net?.destroy();
+  disposeRun();
+  el.farewellBank.textContent = Bank.read().toLocaleString();
+  show('farewell');
+  setTimeout(() => { try { window.close(); } catch { /* not permitted */ } }, 120);
+});
+$('farewell-back').addEventListener('click', () => buildMenu());
+
+el.modeContinue.addEventListener('click', () => {
+  if (isNet() && isHost()) broadcastLobby();
+  renderSelect();
+});
+
+$('host-btn').addEventListener('click', async () => {
+  takeName('Host');
+  audio.resume();
+  const net = new Net();
+  wireNet(net);
+  try {
+    await net.hostGame(session.name);
+    session.net = net;
+    session.mode = 'host';
+    session.localId = net.id;
+    session.roster = [{ id: net.id, name: session.name, ready: false, char: session.character }];
+    await requestMic();
+    renderModes();
+  } catch {
+    show('multiplayer');
+    showMenuError('Could not open a room. The signalling server may be busy.');
+  }
+});
+
+$('join-btn').addEventListener('click', async () => {
+  const code = el.joinCode.value.trim().toUpperCase();
+  if (code.length < 4) { showMenuError('That code looks too short.'); return; }
+  takeName('Guest');
+  audio.resume();
+  const net = new Net();
+  wireNet(net);
+  try {
+    await net.joinGame(code, session.name);
+    session.net = net;
+    session.mode = 'client';
+    session.localId = net.id;
+    await requestMic();
+    renderSelect();
+  } catch (err) {
+    showMenuError(err?.message ?? 'Could not reach that house.');
+  }
+});
+
+el.readyBtn.addEventListener('click', () => {
+  session.ready = !session.ready;
+  const me = meInRoster();
+  if (me) me.ready = session.ready;
+  if (isHost()) broadcastLobby(); else session.net.toHost(MSG.CHAR, { ready: session.ready }, true);
+  renderSelect();
+});
+
+el.startBtn.addEventListener('click', () => {
+  closePreview();
+  const seed = (Math.random() * 1e9) | 0;
+  if (isNet()) {
+    for (const p of session.roster) p.loaded = false;
+    session.net.broadcast(MSG.START, { difficultyId: session.difficultyId, seed }, true);
+  }
+  startRun(difficultyById(session.difficultyId), seed);
+});
+
+el.changeHouse.addEventListener('click', () => { closePreview(); renderModes(); });
+
+async function requestMic() {
+  const ok = await voice.enable();
+  updateMicUI();
+  return ok;
+}
+
+function updateMicUI() {
+  const state = !voice.enabled
+    ? (voice.denied ? 'denied' : 'off')
+    : voice.muted ? 'muted' : 'live';
+  el.micState.textContent = state;
+  el.mic.classList.toggle('off', state !== 'live');
+  el.micHelp.classList.toggle('hidden', state !== 'denied');
+}
+
+el.mic.addEventListener('click', async () => {
+  if (!voice.enabled) {
+    const ok = await requestMic();
+    if (ok && session.net) voice.callAll(session.net.peer, [...session.net.conns.keys()]);
+    return;
+  }
+  voice.setMuted(!voice.muted);
+  updateMicUI();
+});
+voice.onStatus = () => updateMicUI();
+
+el.again.addEventListener('click', () => {
+  const seed = (Math.random() * 1e9) | 0;
+  if (isNet() && isHost()) {
+    for (const p of session.roster) p.loaded = false;
+    session.net.broadcast(MSG.START, { difficultyId: session.difficultyId, seed }, true);
+    startRun(difficultyById(session.difficultyId), seed);
+  } else if (!isNet()) {
+    startRun(run.difficulty, seed);
+  }
+});
+
+el.menuBtn.addEventListener('click', () => {
+  if (isNet()) { disposeRun(); renderSelect(); return; }
+  buildMenu();
+});
+
+// Fullscreen. Requires a user gesture, so it lives on a button rather than a
+// setting that could be applied on load.
+function toggleFullscreen() {
+  const doc = document;
+  if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
+    const root = doc.documentElement;
+    (root.requestFullscreen ?? root.webkitRequestFullscreen)?.call(root)?.catch?.(() => {});
+  } else {
+    (doc.exitFullscreen ?? doc.webkitExitFullscreen)?.call(doc)?.catch?.(() => {});
+  }
+}
+for (const id of ['fullscreen', 'fullscreen-menu', 'fullscreen-settings']) {
+  $(id)?.addEventListener('click', (e) => { e.stopPropagation(); toggleFullscreen(); });
+}
+
+// One Escape handler for every overlay. Pointer lock consumes its own Escape
+// before this ever sees it, so releasing the mouse and closing a panel never
+// happen on the same press.
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (run?.minigame) { closeTerminal(); return; }
+  if (run?.boardOpen) { closeBoard(); return; }
+  if (currentScreen === 'settings' || currentScreen === 'about') {
+    e.preventDefault();
+    (run && !run.over) ? show(null) : buildMenu();
+    return;
+  }
+  if (currentScreen === 'multiplayer' || currentScreen === 'modes') {
+    e.preventDefault();
+    currentScreen === 'modes' && isNet() ? renderSelect() : buildMenu();
+  }
+});
+
+// Clicking away from an open terminal walks away from it.
+$('tv').addEventListener('mousedown', (e) => {
+  if (e.target === $('tv')) closeTerminal();
+});
+$('board').addEventListener('mousedown', (e) => {
+  if (e.target === $('board')) closeBoard();
+});
+
+document.addEventListener('click', (ev) => {
+  if (TOUCH) return;                       // nothing to lock; the stick handles it
+  if (!run || run.over || document.pointerLockElement) return;
+  if (run.minigame || run.boardOpen) return;
+  if (ev.target.closest('button, input, label, a')) return;
+  if (currentScreen !== null) return;
+  const r = canvas.requestPointerLock();
+  if (r && typeof r.catch === 'function') r.catch(() => {});
+});
+
+if (!owns(session.character)) session.character = firstOwned();
+initAds();
+applyGraphics();
+applyAudio();
+buildMenu();
+requestAnimationFrame(menuTick);
+// The diorama shares the texture load with the first house, so this warms
+// both. It appears a moment after the menu rather than holding it up.
+ensureMenuScene();

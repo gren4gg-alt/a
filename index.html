@@ -1,0 +1,830 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, maximum-scale=1">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#05070a">
+<title>The House</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --ink: #cfc4b4; --ink-dim: #6d6559; --ink-faint: #4e483f;
+    --void: #05070a; --ember: #ff9a4d; --exit: #9fffc8; --blood: #e8b9a8;
+    --line: rgba(207,196,180,0.10);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: var(--void); color: var(--ink);
+    font-family: 'IBM Plex Sans', system-ui, sans-serif; font-weight: 300;
+    overflow: hidden; -webkit-font-smoothing: antialiased;
+  }
+  #view { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  .hidden { display: none !important; }
+  em { font-style: normal; }
+
+  .screen {
+    position: fixed; inset: 0; z-index: 30; background: var(--void);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 1.4rem; padding: 2rem 1.5rem; overflow-y: auto;
+  }
+  h1 { margin: 0; font-size: clamp(1.6rem, 4.5vw, 2.6rem); font-weight: 300;
+       letter-spacing: 0.34em; text-indent: 0.34em; }
+  h2 { margin: 0; font-size: 1.05rem; font-weight: 400; letter-spacing: 0.14em; }
+  p { margin: 0; }
+
+  input[type=text] {
+    font: inherit; color: var(--ink); background: rgba(255,255,255,0.03);
+    border: 1px solid var(--line); padding: 0.55rem 0.8rem; letter-spacing: 0.06em;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--ember); }
+  input[type=text]::placeholder { color: var(--ink-faint); }
+
+  .btn {
+    font: inherit; color: var(--ink); cursor: pointer; background: none;
+    border: 1px solid rgba(207,196,180,0.22); padding: 0.55rem 1.3rem;
+    letter-spacing: 0.08em; transition: border-color 160ms, color 160ms, background 160ms;
+  }
+  .btn:hover:not(:disabled), .btn:focus-visible { border-color: var(--ember); color: var(--ember); outline: none; }
+  .btn:disabled { opacity: 0.35; cursor: default; }
+  .btn.primary { border-color: var(--exit); color: var(--exit); }
+  .btn.primary:hover:not(:disabled) { background: rgba(159,255,200,0.07); }
+  .btn.wide { width: 100%; }
+  .btn.quiet { border-color: transparent; color: var(--ink-dim); }
+  .btn.quiet:hover { border-color: var(--line); color: var(--ink); }
+
+  .col { display: flex; flex-direction: column; gap: 0.5rem; width: min(24rem, 90vw); }
+  .row-h { display: flex; gap: 0.5rem; }
+  .row-h > input { flex: 1; min-width: 0; }
+
+  #bank-line { color: var(--ink-dim); font-size: 0.85rem; }
+  #bank, #farewell-bank { color: var(--ember); }
+  #menu-error { color: #e08a6a; font-size: 0.85rem; text-align: center; max-width: 24rem; }
+  .fine { color: var(--ink-faint); font-size: 0.76rem; line-height: 1.75;
+          text-align: center; max-width: 30rem; }
+
+  /* ---- cards ---- */
+  #mode-cards, #quality-list { display: grid; gap: 0.5rem; width: min(30rem, 90vw); }
+  .card {
+    display: grid; gap: 0.22rem; text-align: left; padding: 0.85rem 1.05rem;
+    background: rgba(255,255,255,0.022); border: 1px solid var(--line);
+    color: inherit; font: inherit; cursor: pointer;
+    transition: background 160ms, border-color 160ms;
+  }
+  button.card:hover, button.card:focus-visible {
+    background: rgba(255,154,77,0.06); border-color: rgba(255,154,77,0.4); outline: none;
+  }
+  .card.selected { border-color: var(--ember); background: rgba(255,154,77,0.08); }
+  .card-name { font-size: 1.02rem; font-weight: 400; letter-spacing: 0.1em; }
+  .card-blurb { color: var(--ink-dim); font-size: 0.85rem; line-height: 1.5; }
+  .card-meta { color: var(--ink-faint); font-size: 0.74rem; }
+
+  /* ---- character select ---- */
+  #select-body {
+    display: grid; grid-template-columns: minmax(0,1fr) 17rem; gap: 1.6rem;
+    width: min(52rem, 94vw); align-items: start;
+  }
+  @media (max-width: 780px) { #select-body { grid-template-columns: 1fr; } }
+
+  #char-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.4rem; }
+  .char-chip {
+    display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+    font: inherit; color: var(--ink); text-align: left; cursor: pointer;
+    background: rgba(255,255,255,0.02); border: 1px solid var(--line);
+    padding: 0.55rem 0.7rem; transition: border-color 160ms, background 160ms;
+  }
+  .char-chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--chip); flex: none; }
+  .char-chip em { width: 100%; font-size: 0.72rem; color: var(--ember); }
+  .char-chip:hover { border-color: rgba(207,196,180,0.3); }
+  .char-chip.selected { border-color: var(--chip); background: rgba(255,255,255,0.05); }
+
+  #preview-wrap { display: grid; gap: 0.5rem; justify-items: center; }
+  #preview { width: 15rem; height: 17rem; cursor: grab; touch-action: none;
+             background: radial-gradient(ellipse at 50% 65%, rgba(255,255,255,0.035), transparent 70%); }
+  #preview:active { cursor: grabbing; }
+  #char-name { font-size: 1.1rem; letter-spacing: 0.1em; }
+  #char-tag { color: var(--ink-dim); font-size: 0.82rem; }
+  .detail { width: min(30rem, 90vw); display: grid; gap: 0.3rem; font-size: 0.84rem;
+            border-top: 1px solid var(--line); padding-top: 0.8rem; }
+  .detail .k { color: var(--ink-faint); font-size: 0.72rem; letter-spacing: 0.1em; }
+  #char-passive { color: var(--ink-dim); }
+  #char-ability { color: var(--exit); }
+  #char-ability-text { color: var(--ink-dim); line-height: 1.55; }
+  #char-key { color: var(--ink-faint); font-size: 0.76rem; }
+
+  #roster { display: grid; gap: 0.35rem; width: min(30rem, 90vw); }
+  .player-row { display: flex; align-items: center; gap: 0.55rem; font-size: 0.88rem; }
+  .player-row em { color: var(--ink-faint); font-size: 0.78rem; }
+  .player-row b { margin-left: auto; font-weight: 400; color: var(--ink-faint); font-size: 0.76rem; }
+  .player-row.is-ready b { color: var(--exit); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  #code-line { font-size: 0.82rem; color: var(--ink-dim); text-align: center; }
+  #code { font-size: 1.4rem; color: var(--exit); letter-spacing: 0.4em; display: block; margin-top: 0.25rem; }
+  #select-hint { color: var(--ink-faint); font-size: 0.8rem; }
+  #house-line { font-size: 0.84rem; color: var(--ink-dim); display: flex; align-items: center; gap: 0.6rem; }
+  #house-name { color: var(--ink); }
+
+  #mic.off { color: var(--ink-faint); border-color: rgba(207,196,180,0.12); }
+  #mic-help { color: #e0a06a; font-size: 0.78rem; max-width: 26rem; text-align: center; line-height: 1.7; }
+
+  /* ---- settings ---- */
+  #settings-tabs { display: flex; gap: 0.4rem; }
+  #settings-tabs button {
+    font: inherit; background: none; border: none; border-bottom: 1px solid transparent;
+    color: var(--ink-faint); padding: 0.4rem 0.9rem; cursor: pointer; letter-spacing: 0.1em;
+  }
+  #settings-tabs button.active { color: var(--ember); border-bottom-color: var(--ember); }
+  .panel { display: grid; gap: 0.9rem; width: min(32rem, 92vw); }
+  .field { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 0.6rem 1rem; }
+  .field label { font-size: 0.88rem; color: var(--ink-dim); }
+  .field output { font-size: 0.8rem; color: var(--ink); min-width: 3.2rem; text-align: right; }
+  .field input[type=range] { grid-column: 1 / -1; width: 100%; accent-color: var(--ember); }
+  .check { display: flex; align-items: center; gap: 0.6rem; font-size: 0.88rem; color: var(--ink-dim); cursor: pointer; }
+  .check input { accent-color: var(--ember); width: 1rem; height: 1rem; }
+
+  #bind-list { display: grid; gap: 0.3rem; }
+  .bind-row { display: flex; align-items: center; justify-content: space-between;
+              gap: 1rem; font-size: 0.86rem; color: var(--ink-dim);
+              border-bottom: 1px solid var(--line); padding-bottom: 0.3rem; }
+  .bind-key { min-width: 8rem; text-align: center; padding: 0.32rem 0.7rem; font-size: 0.82rem; }
+  .bind-key.capturing { border-color: var(--ember); color: var(--ember); }
+  .bind-key.unbound { color: var(--ink-faint); }
+
+  /* ---- loading / end ---- */
+  #track { width: min(22rem, 70vw); height: 1px; background: rgba(207,196,180,0.12); }
+  #bar { height: 100%; width: 0; background: var(--ember); transition: width 120ms linear; }
+  #load-note { color: var(--ink-dim); font-size: 0.8rem; min-height: 1.3em; text-align: center; }
+  #end-body { color: var(--ink-dim); font-size: 0.9rem; }
+  #end-rows { width: min(26rem, 88vw); display: grid; gap: 0.4rem; }
+  .row { display: flex; justify-content: space-between; gap: 1.5rem; font-size: 0.86rem;
+         color: var(--ink-dim); border-bottom: 1px solid var(--line); padding-bottom: 0.35rem; }
+  .row span:last-child { color: var(--ink); }
+  #total-line { display: flex; justify-content: space-between; width: min(26rem, 88vw);
+                font-size: 1.1rem; letter-spacing: 0.06em; }
+  #end-total { color: var(--ember); }
+
+  /* ---- about ---- */
+  #about-body { width: min(38rem, 92vw); display: grid; gap: 1.4rem;
+                font-size: 0.87rem; line-height: 1.75; color: var(--ink-dim); }
+  #about-body h2 { color: var(--ink); }
+  #about-body ul { margin: 0.4rem 0 0; padding-left: 1.1rem; }
+  #about-body li { margin-bottom: 0.3rem; }
+  #about-body b { color: var(--ink); font-weight: 400; }
+
+  /* ---- in game ---- */
+  #vignette { position: fixed; inset: 0; z-index: 5; pointer-events: none; opacity: 0;
+    background: radial-gradient(ellipse at center, transparent 30%,
+                rgba(120,12,6,0.32) 78%, rgba(90,6,3,0.6) 100%);
+    transition: opacity 300ms ease; }
+  #hud { position: fixed; left: 1.6rem; bottom: 1.4rem; z-index: 10; pointer-events: none; user-select: none; }
+  #hud-room { font-size: 1.25rem; letter-spacing: 0.16em; opacity: 0.55;
+              text-shadow: 0 1px 12px rgba(0,0,0,0.9); }
+  #carry-line { margin-top: 0.3rem; font-size: 0.8rem; color: var(--ink-dim);
+                text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
+  #hud-carry { color: var(--ember); }
+  #team { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.45rem; font-size: 0.76rem; }
+  .tp { color: var(--ink-dim); text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
+  .tp.down { color: var(--blood); }
+  .tp.gone { color: #5a4640; text-decoration: line-through; }
+  .tp.exit { color: var(--exit); }
+  #hud-timer { position: fixed; right: 1.6rem; bottom: 1.4rem; z-index: 10; font-size: 0.92rem;
+               letter-spacing: 0.12em; color: var(--ink-dim); pointer-events: none;
+               text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
+
+  #power { position: fixed; right: 1.6rem; bottom: 3.4rem; z-index: 10; width: 11rem;
+           pointer-events: none; text-align: right; }
+  #power-line { font-size: 0.78rem; color: var(--ink-faint); text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
+  #power.ready #power-line { color: var(--ink); }
+  #power.active #power-line { color: var(--exit); }
+  #power-track { height: 2px; margin-top: 0.3rem; background: rgba(207,196,180,0.14); }
+  #power-fill { height: 100%; width: 0; background: var(--ink-dim); }
+  #power.ready #power-fill { background: var(--ember); }
+  #power.active #power-fill { background: var(--exit); }
+
+  #talk-indicator { position: fixed; right: 1.6rem; top: 1.4rem; z-index: 10; font-size: 0.76rem;
+                    color: var(--exit); letter-spacing: 0.14em; pointer-events: none;
+                    text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
+
+  #stats { display: none; margin-top: 0.8rem; font-size: 0.74rem; color: var(--ink-dim); line-height: 1.7; }
+  #stats.on { display: block; }
+  #stats b { font-weight: 500; color: var(--ink); }
+
+  #reticle { position: fixed; left: 50%; top: 50%; width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px;
+             border-radius: 50%; background: rgba(207,196,180,0.5); z-index: 10; pointer-events: none; }
+
+  #prompt { position: fixed; inset: 0; z-index: 20; display: grid; place-content: center;
+            justify-items: center; gap: 0.7rem; text-align: center;
+            background: rgba(5,7,10,0.55); pointer-events: none; }
+  #ingame-settings { pointer-events: auto; margin-top: 0.4rem; }
+  #prompt strong { font-weight: 400; font-size: 1.02rem; letter-spacing: 0.06em; }
+  #prompt-keys { font-size: 0.78rem; color: var(--ink-dim); line-height: 2; }
+  #prompt-keys b { font-weight: 400; color: var(--ink); margin: 0 0.12rem; }
+
+  #revive { position: fixed; left: 50%; top: 62%; transform: translateX(-50%); z-index: 12;
+            text-align: center; pointer-events: none; display: grid; gap: 0.4rem; justify-items: center; }
+  #revive span { font-size: 0.86rem; color: var(--blood); text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
+  #revive-track { width: 9rem; height: 2px; background: rgba(232,185,168,0.2); }
+  #revive-bar { height: 100%; width: 0; background: var(--blood); }
+
+  #downed { position: fixed; inset: 0; z-index: 15; display: grid; place-content: center;
+            justify-items: center; gap: 0.5rem; text-align: center; pointer-events: none;
+            background: rgba(40,4,2,0.35); }
+  #downed strong { font-size: 1.45rem; font-weight: 300; letter-spacing: 0.22em; color: var(--blood); }
+  #downed span { font-size: 0.82rem; color: #8a6a5f; line-height: 1.8; }
+  #downed-timer { font-size: 2.5rem; font-weight: 300; color: var(--blood); }
+
+  /* ---- prompts and carried state ---- */
+  #use { position: fixed; left: 50%; top: 57%; transform: translateX(-50%); z-index: 12;
+         text-align: center; pointer-events: none; font-size: 0.9rem;
+         text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
+  #use b { font-weight: 400; color: var(--ember); }
+  #hiding { position: fixed; inset: 0; z-index: 12; pointer-events: none;
+            display: grid; place-content: end center; padding-bottom: 18vh; text-align: center;
+            background: radial-gradient(ellipse 46% 34% at 50% 46%, transparent 55%,
+                        rgba(0,0,0,0.93) 78%, #000 100%); }
+  #hiding span { font-size: 0.84rem; color: var(--ink-dim); text-shadow: 0 1px 10px #000; }
+  #hiding b { font-weight: 400; color: var(--ink); }
+
+  #carrying { position: fixed; right: 1.6rem; top: 1.4rem; z-index: 10; pointer-events: none;
+              font-size: 0.82rem; color: var(--ember); text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
+  #door-status { position: fixed; right: 1.6rem; top: 3.1rem; z-index: 10; pointer-events: none;
+                 font-size: 0.8rem; color: var(--ink-dim); text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
+  #door-status.open { color: var(--exit); }
+  #door-count { color: var(--ink); }
+  #door-status.open #door-count { color: var(--exit); }
+
+  /* ---- terminal minigames ---- */
+  #tv { position: fixed; inset: 0; z-index: 26; background: rgba(2,4,7,0.86);
+        display: grid; place-content: center; }
+  .mg { width: min(30rem, 92vw); background: #0b0f14; border: 1px solid rgba(143,214,255,0.22);
+        box-shadow: 0 0 60px rgba(80,160,220,0.10); }
+  .mg-head { display: flex; justify-content: space-between; align-items: baseline;
+             padding: 0.85rem 1.1rem; border-bottom: 1px solid rgba(143,214,255,0.14); }
+  .mg-title { letter-spacing: 0.14em; color: #cfe6f5; }
+  .mg-name { font-size: 0.76rem; color: #5b7182; }
+  .mg-body { padding: 1.2rem 1.1rem; display: grid; gap: 0.9rem; justify-items: center; }
+  .mg-lead { margin: 0; font-size: 0.82rem; color: #7f95a5; text-align: center; line-height: 1.6; }
+  .mg-foot { display: flex; justify-content: space-between; padding: 0.7rem 1.1rem;
+             border-top: 1px solid rgba(143,214,255,0.14); font-size: 0.74rem; color: #5b7182; }
+  .mg-status { color: #8fd6ff; }
+  .mg.mg-won { border-color: rgba(159,255,200,0.5); }
+  .mg.mg-won .mg-status { color: var(--exit); }
+
+  .mg-grid { display: grid; grid-template-columns: repeat(4, 3.1rem); gap: 0.4rem; }
+  .mg-tile { width: 3.1rem; height: 3.1rem; border: 1px solid rgba(143,214,255,0.2);
+             background: #10161d; cursor: pointer; transition: background 90ms, box-shadow 90ms; }
+  .mg-tile.on { background: #8fd6ff; box-shadow: 0 0 14px rgba(143,214,255,0.6); }
+  .mg-tile:hover { border-color: rgba(143,214,255,0.55); }
+
+  .mg-sum { font-size: 2.1rem; letter-spacing: 0.08em; color: #cfe6f5; }
+  .mg-sum.shake { animation: shake 260ms; }
+  @keyframes shake { 25% { transform: translateX(-7px);} 75% { transform: translateX(7px);} }
+  .mg-sum-row { display: flex; gap: 0.5rem; }
+  .mg-input { font: inherit; font-size: 1.1rem; width: 7rem; text-align: center; color: #cfe6f5;
+              background: #10161d; border: 1px solid rgba(143,214,255,0.28); padding: 0.4rem; }
+  .mg-input:focus { outline: none; border-color: #8fd6ff; }
+  .mg-go { font: inherit; color: #8fd6ff; background: none; cursor: pointer;
+           border: 1px solid rgba(143,214,255,0.28); padding: 0.4rem 1rem; }
+  .mg-go:hover { border-color: #8fd6ff; }
+
+  .mg-blocks { display: flex; gap: 0.35rem; }
+  .mg-block { width: 2.6rem; height: 2.6rem; border: 1px solid rgba(0,0,0,0.4);
+              padding: 0; cursor: pointer; }
+  .mg-target .mg-block { cursor: default; opacity: 0.85; }
+  .mg-block.picked { outline: 2px solid #8fd6ff; outline-offset: 2px; }
+  .mg-divider { width: 100%; height: 1px; background: rgba(143,214,255,0.14); }
+
+  #fullscreen, #fullscreen-menu { position: fixed; right: 1.4rem; top: 1.2rem; z-index: 32;
+    width: 2.1rem; height: 2.1rem; display: grid; place-content: center; padding: 0;
+    border-radius: 50%; font-size: 0.9rem; line-height: 1; }
+  /* In game it must accept a click without the canvas stealing it for pointer lock. */
+  #fullscreen { pointer-events: auto; opacity: 0.45; }
+  #fullscreen:hover { opacity: 1; }
+  #fullscreen-settings { width: auto; height: auto; position: static; border-radius: 0;
+    display: inline-block; padding: 0.55rem 1.1rem; font-size: inherit; }
+
+  /* ---- screens that sit over the 3D diorama ---- */
+  .screen.diorama {
+    background: linear-gradient(100deg,
+      rgba(5,7,10,0.95) 0%, rgba(5,7,10,0.88) 26%,
+      rgba(5,7,10,0.45) 52%, rgba(5,7,10,0.05) 74%, transparent 90%);
+    align-items: flex-start; text-align: left;
+    padding: 2rem clamp(1.5rem, 7vw, 5.5rem);
+    gap: 1.1rem;
+  }
+  .screen.diorama h1 {
+    font-size: clamp(2.3rem, 7vw, 4.1rem); font-weight: 500;
+    letter-spacing: 0.02em; text-indent: 0; line-height: 0.95;
+  }
+  .screen.diorama .col, .screen.diorama #mode-cards, .screen.diorama #roster,
+  .screen.diorama #select-body, .screen.diorama .row-h { align-self: flex-start; }
+  .tagline { max-width: 26rem; color: var(--ink-dim); font-size: 0.92rem; line-height: 1.55; }
+
+  .menu-list { display: grid; width: min(25rem, 88vw); margin-top: 0.3rem; }
+  .menu-list button {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+    text-align: left; background: none; border: none;
+    border-left: 2px solid transparent; border-bottom: 1px solid var(--line);
+    padding: 0.8rem 0 0.8rem 1rem; color: var(--ink-dim); font: inherit;
+    font-size: 1.02rem; cursor: pointer;
+    transition: color 150ms, border-color 150ms, padding-left 150ms;
+  }
+  .menu-list button:hover, .menu-list button:focus-visible {
+    color: var(--ink); border-left-color: var(--ember); padding-left: 1.35rem; outline: none;
+  }
+  .menu-list button.lead { color: var(--ink); font-size: 1.14rem; border-left-color: var(--ember); }
+  .menu-list .note { font-size: 0.73rem; color: var(--ink-faint); letter-spacing: 0.06em; }
+
+  /* ---- blackboard ---- */
+  #board { position: fixed; inset: 0; z-index: 26; background: rgba(2,4,7,0.86);
+           display: grid; place-content: center; gap: 0.7rem; justify-items: center; }
+  .bd { display: grid; gap: 0.6rem; justify-items: center; }
+  .bd-tools { display: flex; gap: 0.4rem; align-items: center; }
+  .bd-chalk { width: 1.9rem; height: 1.9rem; border: 1px solid rgba(207,196,180,0.25);
+              cursor: pointer; padding: 0; font: inherit; font-size: 0.68rem; color: var(--ink-dim);
+              background: none; }
+  .bd-chalk.on { outline: 2px solid var(--ember); outline-offset: 2px; }
+  .bd-eraser { width: auto; padding: 0 0.6rem; }
+  .bd-surface { width: min(46rem, 90vw); aspect-ratio: 3 / 2; cursor: crosshair;
+                border: 1px solid rgba(207,196,180,0.18); touch-action: none; display: block; }
+  .bd-wipe { justify-self: end; }
+  #board-caption { color: var(--ink-faint); font-size: 0.78rem; }
+  #board-room { color: var(--ink-dim); }
+
+  /* ---- who is still standing, top left ---- */
+  #roster-hud { position: fixed; left: 1.6rem; top: 1.3rem; z-index: 10;
+                display: grid; gap: 0.22rem; pointer-events: none; user-select: none; }
+  .rh { display: flex; align-items: center; gap: 0.5rem; font-size: 0.84rem;
+        color: var(--ink); text-shadow: 0 1px 10px rgba(0,0,0,0.95); }
+  .rh i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .rh b { font-weight: 400; font-size: 0.72rem; color: var(--blood); letter-spacing: 0.08em; }
+  .rh.down { color: var(--blood); }
+  .rh.gone { color: #5a4640; text-decoration: line-through; }
+  .rh.gone b { color: #5a4640; }
+
+  /* ---- shop ---- */
+  #shop-body { display: grid; grid-template-columns: minmax(0,1fr) 16rem; gap: 2rem;
+               width: min(52rem, 94vw); align-items: start; }
+  @media (max-width: 800px) { #shop-body { grid-template-columns: 1fr; } }
+  #shop-list { display: grid; gap: 0.5rem; }
+  /* Sticky and vertically centred: the list is long enough to scroll, and the
+     figure sliding off the top of a scrolled page is worse than no preview. */
+  #shop-preview-wrap { display: grid; gap: 0.4rem; justify-items: center;
+                       position: sticky; top: 50%; transform: translateY(-50%); }
+  #shop-preview { width: 15rem; height: 17rem; cursor: grab; touch-action: none;
+    background: radial-gradient(ellipse at 50% 65%, rgba(255,255,255,0.04), transparent 70%); }
+  #shop-preview:active { cursor: grabbing; }
+  #shop-name { font-size: 1rem; letter-spacing: 0.1em; }
+  #shop-tag { color: var(--ink-dim); font-size: 0.8rem; text-align: center; }
+  .shop-card { cursor: pointer; }
+  .shop-card.shown { border-color: var(--chip); background: rgba(255,255,255,0.05); }
+  #shop-list .card { border-left: 2px solid var(--chip); }
+  .shop-card { display: flex; align-items: center; gap: 1.2rem; cursor: default; }
+  .shop-text { display: grid; gap: 0.25rem; flex: 1; min-width: 0; }
+  .shop-side { display: grid; gap: 0.45rem; justify-items: end; flex: none; }
+  .shop-buy { padding: 0.4rem 1.2rem; font-size: 0.86rem; }
+  #shop-list .card.owned { opacity: 0.55; }
+  #shop-list .card.owned .card-meta { color: var(--exit); }
+  #shop-note { color: var(--ember); font-size: 0.84rem; min-height: 1.2em; }
+  .char-chip.locked { opacity: 0.45; }
+  .char-chip.locked span { text-decoration: line-through; }
+
+  /* ---- ads ---- */
+  #ad-earn .note { color: var(--exit); }
+  #ad-modal { position: fixed; inset: 0; z-index: 40; background: rgba(2,4,7,0.92);
+              display: grid; place-content: center; justify-items: center; gap: 1rem; }
+  #ad-modal-text { color: var(--ink); font-size: 1rem; letter-spacing: 0.06em; }
+  #ad-modal .fine { max-width: 22rem; }
+  #ad-revive { margin-top: 0.6rem; pointer-events: auto; }
+  #ad-revive-note { font-size: 0.74rem; color: #8a6a5f; }
+
+  #vote { position: fixed; inset: 0; z-index: 28; background: rgba(20,3,2,0.9);
+          display: grid; place-content: center; justify-items: center; gap: 0.9rem;
+          text-align: center; padding: 2rem; }
+  #vote h2 { color: var(--blood); letter-spacing: 0.2em; }
+  #vote-list { display: grid; gap: 0.3rem; width: min(22rem, 88vw); }
+  .vote-row { display: flex; justify-content: space-between; font-size: 0.86rem;
+              color: var(--ink-dim); border-bottom: 1px solid rgba(232,185,168,0.12);
+              padding-bottom: 0.3rem; }
+  .vote-row b { font-weight: 400; font-size: 0.74rem; color: var(--ink-faint); }
+  .vote-row.yes b { color: var(--exit); }
+  .vote-row.yes { color: var(--ink); }
+  #vote-timer { font-size: 2rem; color: var(--blood); font-weight: 300; }
+
+  /* ---- touch controls ---- */
+  #touch { position: fixed; inset: 0; z-index: 14; touch-action: none; }
+  .tc-look { position: absolute; inset: 0 0 0 40%; }
+  .tc-stickzone { position: absolute; left: 0; bottom: 0; width: 40%; height: 62%; }
+  .tc-base { position: fixed; width: 132px; height: 132px; margin: -66px 0 0 -66px;
+             border: 1px solid rgba(207,196,180,0.22); border-radius: 50%;
+             opacity: 0; transition: opacity 120ms; pointer-events: none; }
+  .tc-base.on { opacity: 1; }
+  .tc-knob { position: absolute; left: 50%; top: 50%; width: 54px; height: 54px;
+             margin: 0; border-radius: 50%; background: rgba(207,196,180,0.20);
+             border: 1px solid rgba(207,196,180,0.35);
+             transform: translate(-50%, -50%); }
+  .tc-buttons { position: absolute; right: 1rem; bottom: 1.1rem;
+                display: grid; grid-template-columns: repeat(3, 4.2rem); gap: 0.5rem;
+                justify-items: center; }
+  .tc-btn { width: 4.2rem; height: 4.2rem; border-radius: 50%; padding: 0;
+            font: inherit; font-size: 0.62rem; letter-spacing: 0.06em;
+            color: var(--ink); background: rgba(10,14,20,0.42);
+            border: 1px solid rgba(207,196,180,0.28); }
+  .tc-btn.big { grid-column: span 3; width: 100%; height: 3rem; border-radius: 1.5rem;
+                font-size: 0.78rem; border-color: rgba(255,154,77,0.5); color: var(--ember); }
+  .tc-btn.on { background: rgba(255,154,77,0.28); border-color: var(--ember); }
+
+  /* On a phone the HUD has to give the controls room, and the menus have to
+     stop assuming a mouse-sized hit area. */
+  @media (pointer: coarse) {
+    #hud { left: 1rem; bottom: auto; top: 5.2rem; }
+    #hud-timer { right: 1rem; bottom: auto; top: 1.2rem; }
+    #power { right: 1rem; bottom: auto; top: 2.9rem; width: 9rem; }
+    #roster-hud { left: 1rem; top: 1.2rem; }
+    #use { top: 46%; }
+    .screen.diorama { padding: 1.5rem 1.2rem; }
+    .screen.diorama h1 { font-size: clamp(2rem, 11vw, 3rem); }
+    .menu-list button { padding: 1rem 0 1rem 1rem; font-size: 1.05rem; }
+    .btn { padding: 0.7rem 1.3rem; }
+    .bind-key { min-width: 7rem; padding: 0.5rem; }
+    #select-body, #shop-body { grid-template-columns: 1fr; }
+    #shop-preview-wrap { position: static; transform: none; }
+    .char-chip { padding: 0.75rem; }
+    .tp, .rh { font-size: 0.78rem; }
+  }
+  @media (pointer: coarse) and (orientation: portrait) {
+    .tc-buttons { grid-template-columns: repeat(2, 4.2rem); }
+    .tc-btn.big { grid-column: span 2; }
+  }
+
+  @media (prefers-reduced-motion: reduce) { * { transition-duration: 0.01ms !important; } }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/",
+    "peerjs": "https://esm.sh/peerjs@1.5.4"
+  }
+}
+</script>
+</head>
+<body>
+
+<canvas id="view"></canvas>
+<div id="vignette"></div>
+<div id="reticle"></div>
+
+<div id="hud" class="hidden">
+  <div id="hud-room">Entrance</div>
+  <div id="carry-line">carrying <span id="hud-carry">nothing</span></div>
+  <div id="team"></div>
+  <div id="stats">
+    <div><b id="hud-fps">—</b> frames per second</div>
+    <div><b id="hud-drawn">—</b> meshes drawn</div>
+    <div><b id="hud-calls">—</b> draw calls</div>
+    <div><b id="hud-tris">—</b> triangles</div>
+    <div id="seed"></div>
+    <div id="hud-net"></div>
+  </div>
+</div>
+<div id="touch" class="hidden"></div>
+<div id="roster-hud" class="hidden"></div>
+<div id="hud-timer" class="hidden">0:00</div>
+<button class="btn quiet hidden" id="fullscreen" title="Fullscreen">&#9974;</button>
+<div id="power" class="hidden">
+  <div id="power-line"><span id="power-name">Flare</span> · <span id="power-key">Q</span></div>
+  <div id="power-track"><div id="power-fill"></div></div>
+</div>
+<div id="talk-indicator" class="hidden">talking</div>
+
+<div id="prompt">
+  <strong>Click to look around</strong>
+  <div id="prompt-keys"></div>
+  <button class="btn quiet" id="ingame-settings">Settings</button>
+</div>
+
+<div id="carrying" class="hidden">carrying <span id="carrying-name"></span></div>
+<div id="door-status">the door wants <span id="door-count">0/4</span></div>
+
+<div id="use" class="hidden"><b id="use-key">E</b> <span id="use-label"></span></div>
+
+<div id="hiding" class="hidden">
+  <span>You are inside. <b id="hiding-key">E</b> to come out.</span>
+</div>
+
+<div id="tv" class="hidden"><div id="tv-body"></div></div>
+
+<div id="board" class="hidden">
+  <div id="board-body"></div>
+  <p id="board-caption">Everyone sees this. Esc, or click away, to stop writing.
+    <span id="board-room"></span></p>
+</div>
+
+<div id="revive" class="hidden">
+  <span>Hold <b id="revive-key">E</b> to pick up <span id="revive-name"></span></span>
+  <div id="revive-track"><div id="revive-bar"></div></div>
+</div>
+
+<div id="downed" class="hidden">
+  <strong>Knocked out</strong>
+  <div id="downed-timer">26</div>
+  <span id="downed-note">Someone has to come and pick you up.</span>
+  <button class="btn hidden" id="ad-revive">Watch an ad and get up</button>
+  <span id="ad-revive-note"></span>
+</div>
+
+<div id="vote" class="hidden">
+  <h2>ALL DOWN</h2>
+  <p class="fine">Everyone has to watch one. If a single person refuses, the house keeps you.</p>
+  <div id="vote-timer">30</div>
+  <div id="vote-list"></div>
+  <div class="row-h">
+    <button class="btn primary" id="vote-watch">Watch an ad</button>
+    <button class="btn quiet" id="vote-quit">Give up the run</button>
+  </div>
+</div>
+
+<div id="ad-modal" class="hidden">
+  <p id="ad-modal-text">Loading</p>
+  <p class="fine">Do not close this tab.</p>
+</div>
+
+<!-- ===================== MENU ===================== -->
+<div id="menu" class="screen diorama">
+  <button class="btn quiet" id="fullscreen-menu" title="Fullscreen">&#9974;</button>
+  <h1>The<br>House</h1>
+  <p class="tagline">
+    It rearranges itself every night. The door out wants four things,
+    and you are not alone in here.
+  </p>
+  <p id="bank-line">banked <span id="bank">0</span></p>
+  <div class="menu-list">
+    <button class="lead" id="go-solo">Play solo</button>
+    <button id="go-multiplayer">Multiplayer<span class="note">up to six</span></button>
+    <button id="open-shop">Shop<span class="note">characters</span></button>
+    <button id="ad-earn">Watch an ad for shards<span class="note" id="ad-earn-note"></span></button>
+    <button id="open-controls">Controls</button>
+    <button id="open-audio">Audio</button>
+    <button id="open-graphics">Graphics</button>
+    <button id="open-about">About &amp; how to play</button>
+    <button id="exit">Exit</button>
+  </div>
+  <p class="fine" style="text-align:left">
+    Nothing you do here leaves your machine except your position and your voice,
+    and those go only to the people whose room code you typed.
+    <br>No account, no server, no analytics. Full details under About.
+  </p>
+</div>
+
+<!-- ===================== MULTIPLAYER ===================== -->
+<div id="multiplayer" class="screen diorama hidden">
+  <h1>Together</h1>
+  <div class="col">
+    <input type="text" id="name" maxlength="14" placeholder="What they should call you">
+    <button class="btn primary wide" id="host-btn">Open a house</button>
+    <p class="fine">You get a five character code. Give it to up to five friends.</p>
+    <div class="row-h">
+      <input type="text" id="join-code" maxlength="5" placeholder="Code">
+      <button class="btn" id="join-btn">Join</button>
+    </div>
+  </div>
+  <p id="menu-error" class="hidden"></p>
+  <button class="btn quiet" id="mp-back">Back</button>
+</div>
+
+<!-- ===================== MODE SELECT ===================== -->
+<div id="modes" class="screen diorama hidden">
+  <h1>The house</h1>
+  <p class="fine">Bigger houses pay more and light less of themselves.</p>
+  <div id="mode-cards"></div>
+  <div class="row-h">
+    <button class="btn quiet" id="modes-back">Back</button>
+    <button class="btn primary" id="mode-continue">Choose who goes in</button>
+  </div>
+</div>
+
+<!-- ===================== CHARACTER SELECT ===================== -->
+<div id="select" class="screen diorama hidden">
+  <h1>Who goes in</h1>
+  <p id="code-line" class="hidden">room code<span id="code">—</span></p>
+  <p id="house-line">
+    <span>House:</span><span id="house-name">Quiet</span>
+    <button class="btn quiet hidden" id="change-house">Change</button>
+  </p>
+
+  <div id="select-body">
+    <div class="col" style="width:auto">
+      <div id="char-list"></div>
+      <div class="detail">
+        <span class="k">PASSIVE</span>
+        <span id="char-passive"></span>
+        <span class="k" style="margin-top:0.5rem">ABILITY · <span id="char-ability"></span></span>
+        <span id="char-ability-text"></span>
+        <span id="char-key"></span>
+      </div>
+    </div>
+    <div id="preview-wrap">
+      <canvas id="preview"></canvas>
+      <div id="char-name"></div>
+      <div id="char-tag"></div>
+    </div>
+  </div>
+
+  <div id="roster"></div>
+  <p id="select-hint"></p>
+  <p id="mic-help" class="hidden">
+    Your browser is blocking the microphone. Click the padlock in the address bar,
+    set Microphone to Allow, then press Mic again. You can play without it.
+  </p>
+  <div class="row-h">
+    <button class="btn quiet hidden" id="ready-btn">Ready</button>
+    <button class="btn off" id="mic">Mic <span id="mic-state">off</span></button>
+    <button class="btn primary" id="start-btn">Go in</button>
+  </div>
+</div>
+
+<!-- ===================== SETTINGS ===================== -->
+<div id="shop" class="screen diorama hidden">
+  <h1>Shop</h1>
+  <p id="bank-line">banked <span id="shop-bank">0</span></p>
+  <p id="shop-note"></p>
+  <div id="shop-body">
+    <div id="shop-list"></div>
+    <div id="shop-preview-wrap">
+      <canvas id="shop-preview"></canvas>
+      <div id="shop-name"></div>
+      <div id="shop-tag"></div>
+    </div>
+  </div>
+  <p class="fine" style="text-align:left">
+    Shards come from getting out alive, from what you carry out, and from every
+    second under par. Harder houses multiply all three.
+  </p>
+  <button class="btn" id="shop-back">Back</button>
+</div>
+
+<div id="settings" class="screen hidden">
+  <h1>Settings</h1>
+  <div id="settings-tabs">
+    <button data-tab="audio" class="active">Audio</button>
+    <button data-tab="controls">Controls</button>
+    <button data-tab="graphics">Graphics</button>
+  </div>
+
+  <div id="tab-audio" class="panel">
+    <div class="field">
+      <label for="vol-master">Everything</label><output id="vol-master-value"></output>
+      <input type="range" id="vol-master" min="0" max="100">
+    </div>
+    <div class="field">
+      <label for="vol-sfx">Sound effects</label><output id="vol-sfx-value"></output>
+      <input type="range" id="vol-sfx" min="0" max="100">
+    </div>
+    <div class="field">
+      <label for="vol-ambience">The drone it makes</label><output id="vol-ambience-value"></output>
+      <input type="range" id="vol-ambience" min="0" max="100">
+    </div>
+    <div class="field">
+      <label for="vol-voice">Other people's voices</label><output id="vol-voice-value"></output>
+      <input type="range" id="vol-voice" min="0" max="100">
+    </div>
+    <div class="field">
+      <label for="mic-gain">Your microphone</label><output id="mic-gain-value"></output>
+      <input type="range" id="mic-gain" min="0" max="200">
+    </div>
+    <label class="check"><input type="checkbox" id="ptt">Push to talk (otherwise your mic is always open)</label>
+    <p class="fine" style="text-align:left">
+      On the harder houses they can hear your microphone. The channel keeping you
+      together is the one giving you away.
+    </p>
+  </div>
+
+  <div id="tab-controls" class="panel hidden">
+    <div id="bind-list"></div>
+    <div class="field">
+      <label for="sensitivity">Mouse sensitivity</label><output id="sensitivity-value"></output>
+      <input type="range" id="sensitivity" min="4" max="60">
+    </div>
+    <label class="check"><input type="checkbox" id="invert-y">Invert vertical look</label>
+    <button class="btn quiet" id="reset-binds">Reset keys to defaults</button>
+  </div>
+
+  <div id="tab-graphics" class="panel hidden">
+    <div id="quality-list"></div>
+    <div class="field">
+      <label for="fov">Field of view</label><output id="fov-value"></output>
+      <input type="range" id="fov" min="60" max="100">
+    </div>
+    <p class="fine" style="text-align:left">
+      Higher quality does not cost frame rate here — the lighting is baked once when the
+      house loads. It costs load time and a little memory instead.
+    </p>
+    <button class="btn quiet" id="reset-all">Reset everything to defaults</button>
+  </div>
+
+  <div class="row-h">
+    <button class="btn" id="settings-back">Back</button>
+    <button class="btn quiet" id="fullscreen-settings">&#9974; Fullscreen</button>
+  </div>
+</div>
+
+<!-- ===================== ABOUT ===================== -->
+<div id="about" class="screen hidden">
+  <h1>About</h1>
+  <div id="about-body">
+
+    <div>
+      <h2>How to play</h2>
+      <p>
+        You wake up in a dark house that rearranges itself every time. Somewhere in it is
+        a green light. Walk into it and you are out.
+      </p>
+      <ul>
+        <li><b>Find the way out.</b> The exit is always the furthest room from where you start. There is no map.</li>
+        <li><b>Take what you can carry.</b> Glowing objects are worth money, and rarer ones are worth a lot more. You keep nothing if you do not get out.</li>
+        <li><b>Something is in there with you.</b> It cannot see through walls and it cannot hear you if you stand still. Running makes you loud. It throws knives, and walking in a straight line is how they hit.</li>
+        <li><b>Getting hit knocks you down, not out.</b> Alone that is the end. With friends, someone has to reach you and hold the pick-up key before you bleed out.</li>
+        <li><b>The door wants four things.</b> Four objects are scattered through the house, each sitting by a screen you have to beat to release it. Carry them back and set them in the door's four holders. It does not open until all four are in.</li>
+        <li><b>The screens are loud.</b> Every second one is on, it is calling them towards you. Walk away at any time with Escape or by clicking off it — you lose only your progress on that puzzle.</li>
+        <li><b>Closets.</b> One per ten rooms, one person each. Inside you are invisible to them and can see out through the peephole. From outside, a lit peephole means it is already taken.</li>
+        <li><b>Crawl holes</b> are too low to stand in and too low for them to follow. Crouch to get through.</li>
+        <li><b>You leave together.</b> Everyone still standing must be at the exit, and nobody may be on the floor. Someone has to be revived or written off before the door opens.</li>
+      </ul>
+    </div>
+
+    <div>
+      <h2>Money</h2>
+      <p>
+        Escaping pays a base, plus what you carried out, plus a bonus for every second under
+        par. Par is measured from the actual house you were given, not guessed. Harder houses
+        multiply all of it. Getting knocked out for good pays nothing.
+      </p>
+    </div>
+
+    <div>
+      <h2>Privacy</h2>
+      <p>
+        This is worth reading properly, because multiplayer means peer to peer here and that
+        has real consequences.
+      </p>
+      <ul>
+        <li><b>No account, no login, no analytics, no cookies.</b> Nothing is tracked and nothing is sent to us, because there is no us — the game is static files running in your browser.</li>
+        <li><b>Your settings and your bank balance</b> are stored in your browser's local storage on your own machine. Clearing site data erases them. They are never uploaded.</li>
+        <li><b>Multiplayer is direct between players.</b> A public signalling server is used only to introduce two browsers to each other; after that, position data and voice travel straight from your machine to theirs and never through any server we control.</li>
+        <li><b>That introduction reveals your IP address to the other players</b> in the room, and theirs to you. This is how WebRTC works and it is unavoidable for peer to peer. Only join rooms whose code you got from someone you are willing to share that with.</li>
+        <li><b>The microphone is optional.</b> It is only requested when you open or join a room, audio is only captured while your talk key is held if push to talk is on, and nothing is ever recorded or stored. Refuse permission and everything else still works.</li>
+        <li><b>The room code is not a password.</b> Anyone who has it can join until the room is full.</li>
+      </ul>
+    </div>
+
+    <div>
+      <h2>Credits</h2>
+      <p>
+        Built on three.js for rendering and PeerJS for the peer connections. All sound is
+        generated in the browser with the Web Audio API — there are no audio files. Every
+        house is generated from a seed, so the same seed always produces the same house.
+      </p>
+    </div>
+  </div>
+  <button class="btn" id="about-back">Back</button>
+</div>
+
+<!-- ===================== LOADING ===================== -->
+<div id="loading" class="screen hidden">
+  <h1 id="load-title">Quiet</h1>
+  <div id="track"><div id="bar"></div></div>
+  <p id="load-note">Laying out the rooms</p>
+</div>
+
+<!-- ===================== END ===================== -->
+<div id="end" class="screen hidden">
+  <h1 id="end-title">Out</h1>
+  <p id="end-body"></p>
+  <div id="end-rows"></div>
+  <div id="total-line"><span>Payout</span><span id="end-total">0</span></div>
+  <div class="row-h">
+    <button class="btn primary" id="again">Go back in</button>
+    <button class="btn" id="menu-btn">Back</button>
+  </div>
+</div>
+
+<!-- ===================== FAREWELL ===================== -->
+<div id="farewell" class="screen hidden">
+  <h1>Closed</h1>
+  <p class="fine">
+    You banked <span id="farewell-bank">0</span>. It is saved in this browser.
+    <br>You can close the tab now — a page cannot close itself unless a script opened it.
+  </p>
+  <button class="btn quiet" id="farewell-back">Actually, one more</button>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
