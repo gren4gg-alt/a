@@ -27,13 +27,13 @@ import { showRewarded, initAds, adsEnabled, menuCooldownLeft, markMenuAdWatched,
 import { AD_CONFIG } from './adsconfig.js';
 import { owns, buy, priceOf, firstOwned } from './shop.js';
 import { Audio } from './audio.js';
-import { Net, MSG, PROTOCOL } from './net.js';
+import { Net, MSG, PROTOCOL, sessionId } from './net.js';
 import { Voice } from './voice.js';
 import { RemotePlayer, PLAYER_COLORS, reviveCandidate, REVIVE_SECONDS } from './remote.js';
 import { settings, keyLabel } from './settings.js';
 import { buildSettingsUI } from './ui.js';
 import { CHARACTERS, characterById, Loadout, DEFAULT_CHARACTER, ABILITY_DURATION } from './characters.js';
-import { CharacterPreview } from './preview.js';
+import { CharacterRoom } from './charroom.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -44,14 +44,14 @@ const el = {
   name: $('name'), joinCode: $('join-code'), menuError: $('menu-error'), bank: $('bank'),
   modeCards: $('mode-cards'), modeContinue: $('mode-continue'),
   code: $('code'), codeLine: $('code-line'), roster: $('roster'),
+  readyBtn: $('ready-btn'), startBtn: $('start-btn'),
   charList: $('char-list'), charName: $('char-name'), charTag: $('char-tag'),
   charPassive: $('char-passive'), charAbility: $('char-ability'),
   charAbilityText: $('char-ability-text'), charKey: $('char-key'),
-  previewCanvas: $('preview'), readyBtn: $('ready-btn'), startBtn: $('start-btn'),
   selectHint: $('select-hint'), houseName: $('house-name'), changeHouse: $('change-house'),
   mic: $('mic'), micState: $('mic-state'), micHelp: $('mic-help'),
   bar: $('bar'), loadNote: $('load-note'), loadTitle: $('load-title'),
-  hud: $('hud'), room: $('hud-room'), timer: $('hud-timer'), carry: $('hud-carry'),
+  hud: $('hud'), room: $('hud-room'), safeTag: $('safe-tag'), timer: $('hud-timer'), carry: $('hud-carry'),
   team: $('team'), stats: $('stats'), fps: $('hud-fps'), drawn: $('hud-drawn'),
   calls: $('hud-calls'), tris: $('hud-tris'), seed: $('seed'), net: $('hud-net'),
   power: $('power'), powerName: $('power-name'), powerKey: $('power-key'), powerFill: $('power-fill'),
@@ -64,11 +64,12 @@ const el = {
   board: $('board'), boardBody: $('board-body'), boardRoom: $('board-room'),
   rosterHud: $('roster-hud'),
   shopList: $('shop-list'), shopBank: $('shop-bank'), shopNote: $('shop-note'),
-  shopPreview: $('shop-preview'), shopName: $('shop-name'), shopTag: $('shop-tag'),
+  shopName: $('shop-name'), shopTag: $('shop-tag'),
   adEarn: $('ad-earn'), adEarnNote: $('ad-earn-note'),
   adModal: $('ad-modal'), adModalText: $('ad-modal-text'),
   adRevive: $('ad-revive'), adReviveNote: $('ad-revive-note'),
   vote: $('vote'), voteList: $('vote-list'), voteTimer: $('vote-timer'),
+  giveUp: $('give-up'),
   touchEdit: $('touch-edit'), teWhich: $('te-which'), rotate: $('rotate'),
   voteWatch: $('vote-watch'), voteQuit: $('vote-quit'),
   carrying: $('carrying'), carryingName: $('carrying-name'),
@@ -104,16 +105,38 @@ function show(name) {
 const DIORAMA = new Set(['menu', 'multiplayer', 'modes', 'select', 'shop']);
 
 let menuScene = null;
+let charRoom = null;
 let menuLast = 0;
+
+// Screens that show the character room instead of the corridor diorama.
+const CHAR_SCREENS = new Set(['select', 'shop']);
 
 function menuTick(now) {
   requestAnimationFrame(menuTick);
   const dt = Math.min((now - menuLast) / 1000, 0.1);
   menuLast = now;
+  if (crashed) return;
+
+  if (CHAR_SCREENS.has(currentScreen) && charRoom) {
+    charRoom.resize(window.innerWidth, window.innerHeight);
+    charRoom.update(dt);
+    renderer.render(charRoom.scene, charRoom.camera);
+    return;
+  }
   if (!menuScene || !DIORAMA.has(currentScreen)) return;
   menuScene.update(dt);
   menuScene.resize(window.innerWidth, window.innerHeight);
   renderer.render(menuScene.scene, menuScene.camera);
+}
+
+function ensureCharRoom() {
+  if (!charRoom) {
+    charRoom = new CharacterRoom();
+    charRoom.bindDrag($('select'));
+    charRoom.bindDrag($('shop'));
+  }
+  charRoom.resize(window.innerWidth, window.innerHeight);
+  return charRoom;
 }
 
 async function ensureMenuScene() {
@@ -161,6 +184,34 @@ const Bank = {
 // swaps in a fresh canvas. Only ever done from a menu, never mid-run.
 // ---------------------------------------------------------------------------
 
+export const BUILD = '1.0.0';
+
+// ---------------------------------------------------------------------------
+// Failure handling.
+//
+// A WebGL game that throws leaves a black screen and no explanation, and the
+// player has no console open. Everything below exists so that a crash, a lost
+// GPU context or a backgrounded tab produces something a person can act on.
+// ---------------------------------------------------------------------------
+
+let crashed = false;
+
+function reportCrash(what, err) {
+  if (crashed) return;
+  crashed = true;
+  console.error(`[${what}]`, err);
+  try { cancelAnimationFrame(rafId); } catch { /* not running */ }
+  try { document.exitPointerLock?.(); } catch { /* not locked */ }
+  const box = document.getElementById('crash');
+  const detail = document.getElementById('crash-detail');
+  if (!box) return;
+  detail.textContent = `${what}: ${err?.message ?? err ?? 'unknown'}`;
+  box.classList.remove('hidden');
+}
+
+window.addEventListener('error', (e) => reportCrash('Error', e.error ?? e.message));
+window.addEventListener('unhandledrejection', (e) => reportCrash('Failed', e.reason));
+
 const TOUCH = isTouchDevice();
 let touchControls = null;
 
@@ -177,6 +228,26 @@ function makeRenderer() {
     canvas, antialias: rendererAA, powerPreference: 'high-performance', stencil: false,
   });
   r.setClearColor(CONFIG.fogColor, 1);
+
+  // Losing the GPU context is routine on mobile: another app takes it, or the
+  // driver resets. Without preventDefault the browser never restores it, and
+  // the page is dead with no error thrown anywhere.
+  canvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+    cancelAnimationFrame(rafId);
+    document.getElementById('ctxlost')?.classList.remove('hidden');
+  }, false);
+  canvas.addEventListener('webglcontextrestored', () => {
+    document.getElementById('ctxlost')?.classList.add('hidden');
+    // Every GPU-side object died with the context, so the house has to be
+    // rebuilt. Returning to the lobby is honest; silently continuing is not.
+    disposeRun();
+    menuScene?.dispose();
+    menuScene = null;
+    ensureMenuScene();
+    isNet() ? renderSelect() : buildMenu();
+  }, false);
+
   return r;
 }
 
@@ -212,8 +283,7 @@ window.addEventListener('resize', () => {
   renderer?.setSize(window.innerWidth, window.innerHeight);
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  preview?.resize();
-  shopPreview?.resize();
+  charRoom?.resize(window.innerWidth, window.innerHeight);
   menuScene?.resize(window.innerWidth, window.innerHeight);
 });
 
@@ -553,6 +623,7 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     difficulty, level, scene, material, player, remotes, ghosts, vis, grid,
     loadout, loadouts, interact, lootItems, lootMat, beadMat, exitMat, exitRoom, pillar,
     carrying: null, minigame: null, busyTerminals: new Map(), useTarget: null,
+    sheltered: null,
     boardOpen: null, boardEditor: null, adRevives: 0, vote: null,
     exitBead, flare, flareUntil: 0, senseUntil: 0,
     trapMat, trapGeo, trapGroup, traps: [],
@@ -780,6 +851,12 @@ function hostSetHide(closetId, playerId) {
     // only the occupant may leave
   }
   applyHide(closetId, playerId);
+  // Shutting a door in its face works. It gives up and goes elsewhere, rather
+  // than waiting outside for the one exit you have.
+  if (playerId) {
+    const c = run.interact.closetById(closetId);
+    if (c) scatterGhosts(c.x, c.z, 9);
+  }
   if (isNet()) {
     session.net.broadcast(MSG.HIDE, {
       c: closetId, i: playerId ? rosterIndex(playerId) : null,
@@ -972,9 +1049,27 @@ function hostKnockDown(playerId) {
   }
 
   target.downed = true;
-  run.downTimers.set(playerId, 26 * (lo?.stats.bleedScale ?? 1));
-  if (isNet()) session.net.broadcast(MSG.DOWN, { i: rosterIndex(playerId), dead: false }, true);
+  const seconds = CONFIG.bleedOutSeconds * (lo?.stats.bleedScale ?? 1);
+  run.downTimers.set(playerId, seconds);
+
+  // Whatever put them down loses interest and leaves. Otherwise it stands over
+  // the body and nobody can get close enough to help, which turns one mistake
+  // into the end of the run.
+  scatterGhosts(target.pos.x, target.pos.z, 14);
+  if (isNet()) {
+    session.net.broadcast(MSG.DOWN, {
+      i: rosterIndex(playerId), dead: false, t: Math.round(seconds),
+    }, true);
+  }
   if (playerId === session.localId) applyDownLocal();
+}
+
+/** Every ghost within reach forgets this spot for a while. Host only. */
+function scatterGhosts(x, z, seconds) {
+  if (!isHost() || !run) return;
+  for (const g of run.ghosts) {
+    if (Math.hypot(g.pos.x - x, g.pos.z - z) < 30) g.retreat(x, z, seconds, run.time);
+  }
 }
 
 function hostKill(playerId) {
@@ -1006,6 +1101,12 @@ function applyDownLocal() {
   if (run.boardOpen) closeBoard();
   audio.hit();
   el.downed.classList.remove('hidden');
+  el.downedTimer.textContent = String(Math.ceil(
+    run.downTimers.get(session.localId) ?? CONFIG.bleedOutSeconds,
+  ));
+  // Solo only: in multiplayer, conceding alone should not end anyone else's
+  // run, and the group vote covers the case where it genuinely is over.
+  el.giveUp.classList.toggle('hidden', isNet());
   refreshAdRevive();
   const canSelfRevive = run.loadout.char.id === 'nurse' && run.loadout.ready;
   el.downedNote.textContent = canSelfRevive
@@ -1041,6 +1142,13 @@ function refreshAdRevive() {
     : '';
 }
 
+// Solo only. In multiplayer, walking away is what the group vote is for, and
+// one person conceding should not take the run away from everyone else.
+el.giveUp.addEventListener('click', () => {
+  if (!run || isNet()) return;
+  endRun(false);
+});
+
 el.adRevive.addEventListener('click', async () => {
   if (!run || !run.player.downed || run.player.dead) return;
   if ((run.adRevives ?? 0) >= AD_CONFIG.selfRevivesPerRun) return;
@@ -1067,6 +1175,9 @@ function hostOpenVote() {
 
 function openVoteUI() {
   if (!adsEnabled()) { if (isHost()) hostCloseVote(false); return; }
+  // The group decision replaces the individual one; two overlays offering
+  // different ways out of the same moment is just confusing.
+  el.downed.classList.add('hidden');
   el.vote.classList.remove('hidden');
   el.voteWatch.disabled = false;
   renderVote();
@@ -1109,6 +1220,7 @@ function hostCloseVote(revive) {
 
 function applyGroupRevive() {
   el.vote.classList.add('hidden');
+  el.giveUp.classList.add('hidden');
   for (const pl of allPlayers()) {
     pl.dead = false;
     pl.downed = false;
@@ -1131,6 +1243,7 @@ el.voteWatch.addEventListener('click', async () => {
 
 el.voteQuit.addEventListener('click', () => {
   el.vote.classList.add('hidden');
+  // One refusal ends it for everyone, which is the point of it being a vote.
   if (isHost()) hostCloseVote(false);
   else session.net.toHost(MSG.VOTE, { n: 'no' }, true);
 });
@@ -1148,6 +1261,7 @@ function endRun(escaped, remoteElapsed) {
   document.exitPointerLock?.();
   el.downed.classList.add('hidden');
   el.revive.classList.add('hidden');
+  el.giveUp.classList.add('hidden');
   voice.setTalking(false);
 
   if (isHost() && isNet()) {
@@ -1216,7 +1330,15 @@ const targetDir = new THREE.Vector3();
 
 function frame(now) {
   rafId = requestAnimationFrame(frame);
-  if (!run) return;
+  if (!run || crashed) return;
+  try {
+    step(now);
+  } catch (err) {
+    reportCrash('Frame', err);
+  }
+}
+
+function step(now) {
 
   const dt = Math.min((now - lastFrame) / 1000, 0.1);
   lastFrame = now;
@@ -1276,6 +1398,16 @@ function frame(now) {
   run.trapMat.uniforms.uTime.value = run.time;
 
   if (run.vis.update(run.player.pos.x, run.player.pos.z)) el.room.textContent = run.vis.roomName;
+
+  // Say so, plainly. A safe room nobody realises is safe is not a mechanic.
+  const sr = run.level.safeRoom;
+  const sheltered = !!sr && run.player.pos.x > sr.x0 && run.player.pos.x < sr.x1
+    && run.player.pos.z > sr.z0 && run.player.pos.z < sr.z1;
+  if (sheltered !== run.sheltered) {
+    run.sheltered = sheltered;
+    el.room.classList.toggle('safe', sheltered);
+    el.safeTag.classList.toggle('hidden', !sheltered);
+  }
   renderer.render(run.scene, camera);
 
   fpsAccum += dt; fpsFrames++;
@@ -1339,10 +1471,19 @@ function simulate(dt) {
       if (touched) { hostKnockDown(touched); break; }
     }
     hostCheckTraps();
+    hostCheckLastStand();
     checkEscape();
   }
 
   if (p.downed && !p.dead) {
+    // Only the host decides when somebody actually bleeds out, but it is the
+    // host that was counting down, so a downed client sat looking at a frozen
+    // number. Clients tick their own copy purely for the display; the host's
+    // DOWN message resets it whenever the two drift.
+    if (!isHost() && !run.vote) {
+      const left = run.downTimers.get(p.id);
+      if (left !== undefined) run.downTimers.set(p.id, Math.max(0, left - dt));
+    }
     const left = run.downTimers.get(p.id);
     if (left !== undefined) el.downedTimer.textContent = Math.ceil(Math.max(0, left));
   }
@@ -1513,13 +1654,37 @@ function claimLoot(l) {
   el.carry.textContent = `${run.carried.length} · ${worth}`;
 }
 
-function checkEscape() {
+/**
+ * Everyone on the floor is already the end of the run — nobody left standing
+ * can pick anybody up — so the choice is offered then, rather than after
+ * watching four separate timers run out one at a time.
+ *
+ * Only when ads are available. With them switched off there is nothing to
+ * offer, so the bleed-out timers simply run and the run ends on its own.
+ */
+function hostCheckLastStand() {
+  if (run.vote || run.over) return;
   const live = livePlayers();
-  if (!live.length) {
-    // Not over yet: offer the group a way back before taking the run away.
-    adsEnabled() ? hostOpenVote() : endRun(false);
-    return;
-  }
+  const allGone = !live.length;
+  const allDown = live.length > 0 && live.every((pl) => pl.downed);
+  if (!allGone && !allDown) return;
+
+  // Solo keeps its own panel. Three ad revives and a give-up button are already
+  // on screen, and a unanimous vote with one voter is just the same choice in
+  // worse words. When the timer genuinely runs out, that is the end.
+  if (!isNet()) { if (allGone) endRun(false); return; }
+
+  // Nothing to offer without ads, so the bleed-out timers simply run.
+  if (!adsEnabled()) { if (allGone) endRun(false); return; }
+
+  hostOpenVote();
+}
+
+function checkEscape() {
+  if (run.over) return;
+  const live = livePlayers();
+  // Ending the run is hostCheckLastStand's job; this only decides escapes.
+  if (!live.length) return;
   if (live.some((pl) => pl.downed)) return;
   // The door does not open on arrival. It opens when its four holders are full.
   if (!run.interact.doorOpen) return;
@@ -1621,25 +1786,52 @@ function wireNet(net) {
     return null;
   };
 
-  net.on('joined', ({ id, name }) => {
+  net.on('joined', ({ id, name, sid }) => {
     if (!isHost()) return;
+
+    // A refresh gives them a brand new peer id while the old connection sits
+    // in the roster until it times out, which is how one person appeared
+    // twice. Match on the browser's stable session id and replace instead.
+    if (sid) {
+      const stale = session.roster.find((p) => p.sid === sid && p.id !== id);
+      if (stale) {
+        net.kick(stale.id, 'Reconnected from another tab.');
+        session.roster = session.roster.filter((p) => p.id !== stale.id);
+        if (run) {
+          const r = run.remotes.get(stale.id);
+          if (r) { r.dispose(run.scene); run.remotes.delete(stale.id); }
+        }
+      }
+    }
+
     // Checked again: the gate ran when the connection opened, and the roster
     // can have filled between then and now.
     if (roomLocked || session.roster.length >= 6) { net.send(id, MSG.DENY, { why: 'The room closed.' }, true); return; }
     if (!session.roster.some((p) => p.id === id)) {
-      session.roster.push({ id, name: cleanName(name), ready: false, char: DEFAULT_CHARACTER });
+      session.roster.push({ id, sid, name: cleanName(name), ready: false, char: DEFAULT_CHARACTER });
     }
     broadcastLobby();
     voice.callAll(net.peer, [...net.conns.keys()]);
   });
 
+  net.on('timeout', ({ id }) => {
+    if (!isHost()) return;
+    session.roster = session.roster.filter((p) => p.id !== id);
+    broadcastLobby();
+  });
+
   net.on(MSG.DENY, (d) => {
+    voice.shutdown();
     session.net?.destroy();
     session.net = null;
     session.mode = 'solo';
     session.roster = [];
+    roomLocked = false;
+    disposeRun();
     show('multiplayer');
-    showMenuError(d?.why ?? 'The host would not let you in.');
+    showMenuError(d?.kicked
+      ? (d.why ?? 'The host removed you from the room.')
+      : (d?.why ?? 'The host would not let you in.'));
   });
 
   net.on('left', ({ id }) => {
@@ -1803,7 +1995,7 @@ function wireNet(net) {
     const target = allPlayers().find((p) => p.id === id);
     if (target) { target.downed = !d.dead; target.dead = d.dead; }
     if (id === session.localId) d.dead ? applyDeadLocal() : applyDownLocal();
-    if (!d.dead) run.downTimers.set(id, 26);
+    if (!d.dead) run.downTimers.set(id, d.t ?? CONFIG.bleedOutSeconds);
   });
 
   net.on(MSG.REVIVE, (d, from) => {
@@ -1848,7 +2040,9 @@ function hostMarkLoaded(id) {
 
 function broadcastLobby() {
   session.net?.broadcast(MSG.LOBBY, {
-    roster: session.roster.map((p) => ({ id: p.id, name: p.name, ready: p.ready, char: p.char })),
+    roster: session.roster.map((p) => ({
+      id: p.id, sid: p.sid, name: p.name, ready: p.ready, char: p.char,
+    })),
     difficultyId: session.difficultyId,
   }, true);
   if (currentScreen === 'select') renderSelect();
@@ -1897,14 +2091,9 @@ function renderModes() {
   show('modes');
 }
 
-let preview = null;
-
 function renderSelect() {
-  if (!preview) {
-    preview = new CharacterPreview(el.previewCanvas);
-  }
   const chosen = characterById(session.character);
-  preview.show(chosen);
+  ensureCharRoom().show(chosen);
 
   el.charName.textContent = chosen.name;
   el.charTag.textContent = chosen.tag;
@@ -1973,6 +2162,20 @@ function renderSelect() {
   show('select');
 }
 
+function kickPlayer(id, name) {
+  if (!isHost() || !session.net) return;
+  session.net.kick(id, 'The host removed you from the room.');
+  session.roster = session.roster.filter((p) => p.id !== id);
+  voice.drop(id);
+  if (run) {
+    const r = run.remotes.get(id);
+    if (r) { r.dispose(run.scene); run.remotes.delete(id); }
+    run.downTimers.delete(id);
+  }
+  el.selectHint.textContent = `${name} was removed.`;
+  broadcastLobby();
+}
+
 function pickCharacter(id) {
   if (!owns(id)) {
     el.selectHint.textContent = `${characterById(id).name} is locked \u2014 ${priceOf(id).toLocaleString()} shards in the shop.`;
@@ -1988,23 +2191,19 @@ function pickCharacter(id) {
   renderSelect();
 }
 
-function closePreview() {
-  preview?.dispose();
-  preview = null;
-}
+// The room is shared and cheap to keep; only stop drawing it.
+function closePreview() {}
 
-let shopPreview = null;
 let shopSelected = null;
 
 function renderShop() {
   el.shopBank.textContent = Bank.read().toLocaleString();
   shopSelected = shopSelected ?? session.character;
 
-  // The same turntable the character screen uses. Nobody should have to spend
+  // The same room the character screen uses. Nobody should have to spend
   // 2,200 shards on a silhouette they have only seen as a coloured dot.
-  if (!shopPreview) shopPreview = new CharacterPreview(el.shopPreview);
   const shown = characterById(shopSelected);
-  shopPreview.show(shown);
+  ensureCharRoom().show(shown);
   el.shopName.textContent = shown.name;
   el.shopTag.textContent = shown.tag;
 
@@ -2089,11 +2288,7 @@ el.adEarn.addEventListener('click', async () => {
 });
 
 $('open-shop').addEventListener('click', () => renderShop());
-$('shop-back').addEventListener('click', () => {
-  shopPreview?.dispose();
-  shopPreview = null;
-  buildMenu();
-});
+$('shop-back').addEventListener('click', () => buildMenu());
 
 setInterval(() => {
   if (currentScreen === 'menu' || currentScreen === 'shop') refreshAdEarn();
@@ -2189,7 +2384,8 @@ $('host-btn').addEventListener('click', async () => {
     session.net = net;
     session.mode = 'host';
     session.localId = net.id;
-    session.roster = [{ id: net.id, name: session.name, ready: false, char: session.character }];
+    session.roster = [{ id: net.id, sid: sessionId(), name: session.name, ready: false, char: session.character }];
+    net.startHeartbeat();
     await requestMic();
     renderModes();
   } catch {
@@ -2210,6 +2406,7 @@ $('join-btn').addEventListener('click', async () => {
     session.net = net;
     session.mode = 'client';
     session.localId = net.id;
+    net.startHeartbeat();
     await requestMic();
     renderSelect();
   } catch (err) {
@@ -2427,6 +2624,29 @@ document.addEventListener('click', (ev) => {
 
 if (!owns(session.character)) session.character = firstOwned();
 initAds();
+// A backgrounded tab still has to simulate in multiplayer — the host cannot
+// pause for everyone else — but it should not be making noise or holding the
+// cursor. Solo genuinely stops.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    audio.silence();
+    try { document.exitPointerLock?.(); } catch { /* not locked */ }
+  } else {
+    lastFrame = performance.now();     // do not integrate the whole absence
+  }
+});
+
+// Leave cleanly: a peer that vanishes without closing sits in someone else's
+// roster until the heartbeat times it out.
+window.addEventListener('pagehide', () => {
+  try { voice.shutdown(); } catch { /* already down */ }
+  try { session.net?.destroy(); } catch { /* already gone */ }
+  if (TOUCH) unlockOrientation();
+});
+
+const buildTag = document.getElementById('build');
+if (buildTag) buildTag.textContent = `v${BUILD}`;
+
 applyGraphics();
 applyAudio();
 buildMenu();

@@ -47,7 +47,30 @@ export const MSG = {
  * otherwise joins successfully and then behaves inexplicably, which is far
  * harder to diagnose than being told to refresh.
  */
-export const PROTOCOL = 3;
+export const PROTOCOL = 4;
+
+/**
+ * A stable id for this browser, surviving refreshes.
+ *
+ * PeerJS hands out a new peer id every page load, so a player who refreshes
+ * arrives as a stranger while their old connection sits in the roster until it
+ * times out — which is how the same person ends up listed twice. Matching on
+ * this instead lets the host recognise a reconnect and replace them.
+ */
+export function sessionId() {
+  const KEY = 'darkhouse.session.v1';
+  try {
+    let v = localStorage.getItem(KEY);
+    if (!v) {
+      v = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      localStorage.setItem(KEY, v);
+    }
+    return v;
+  } catch {
+    this._mem = this._mem ?? `s${Math.random().toString(36).slice(2, 10)}`;
+    return this._mem;
+  }
+}
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1
 const PREFIX = 'darkhouse-v1-';
@@ -117,7 +140,7 @@ export class Net {
         this.id = id;
         const rel = this.peer.connect(this.hostId, {
           reliable: true, serialization: 'json',
-          metadata: { role: 'rel', name, protocol: PROTOCOL },
+          metadata: { role: 'rel', name, protocol: PROTOCOL, sid: sessionId() },
         });
         const unrel = this.peer.connect(this.hostId, {
           reliable: false, serialization: 'json',
@@ -163,23 +186,75 @@ export class Net {
 
     let entry = this.conns.get(conn.peer);
     if (!entry) {
-      entry = { rel: null, unrel: null, name: conn.metadata?.name ?? 'Someone', ready: false };
+      entry = {
+        rel: null, unrel: null, ready: false, announced: false,
+        name: conn.metadata?.name ?? 'Someone',
+        sid: conn.metadata?.sid ?? null,
+        lastSeen: Date.now(),
+      };
       this.conns.set(conn.peer, entry);
     }
     entry[role] = conn;
     if (conn.metadata?.name) entry.name = conn.metadata.name;
+    if (conn.metadata?.sid) entry.sid = conn.metadata.sid;
     this._wire(conn.peer, conn);
 
-    conn.on('open', () => {
-      // Only announce once both channels are up, or we would broadcast a
-      // roster to someone who cannot yet hear the unreliable stream.
-      if (entry.rel?.open && entry.unrel?.open) this._emit('joined', { id: conn.peer, name: entry.name });
-    });
+    const announce = () => {
+      // Both channels up, and exactly once. Each connection fires its own
+      // open event, and if the second is already open when its handler is
+      // attached, both would announce — which put the same player in the
+      // roster twice.
+      if (entry.announced) return;
+      if (!entry.rel?.open || !entry.unrel?.open) return;
+      entry.announced = true;
+      this._emit('joined', { id: conn.peer, name: entry.name, sid: entry.sid });
+    };
+    conn.on('open', announce);
+    announce();     // in case it opened before we got here
+  }
+
+  /**
+   * Drop a peer deliberately. The reason reaches them before the socket
+   * closes, so they see why rather than an unexplained disconnect.
+   */
+  kick(peerId, why) {
+    const entry = this.conns.get(peerId);
+    if (!entry) return;
+    try { entry.rel?.send({ t: 'no', d: { why, kicked: true } }); } catch { /* already gone */ }
+    setTimeout(() => {
+      try { entry.rel?.close(); entry.unrel?.close(); } catch { /* already gone */ }
+      this._dropped(peerId);
+    }, 350);
+  }
+
+  /**
+   * Heartbeat. PeerJS can take a long time to notice a browser that was closed
+   * or went to sleep, and a ghost in the roster blocks a slot and stalls the
+   * ready check forever.
+   */
+  startHeartbeat(timeoutMs = 12000) {
+    clearInterval(this._hb);
+    this._hb = setInterval(() => {
+      const now = Date.now();
+      for (const [peerId, entry] of [...this.conns]) {
+        if (peerId === this.hostId && !this.isHost) continue;
+        if (now - (entry.lastSeen ?? now) > timeoutMs) {
+          this._emit('timeout', { id: peerId });
+          this._dropped(peerId);
+          continue;
+        }
+        try { entry.rel?.send({ t: 'ping', d: 0 }); } catch { /* dropping next tick */ }
+      }
+    }, 3000);
   }
 
   _wire(peerId, conn) {
     conn.on('data', (raw) => {
       if (!raw || typeof raw !== 'object') return;
+      const entry = this.conns.get(peerId);
+      if (entry) entry.lastSeen = Date.now();     // anything at all counts
+      if (raw.t === 'ping') { try { conn.send({ t: 'pong', d: 0 }); } catch { /* gone */ } return; }
+      if (raw.t === 'pong') return;
       this._emit(raw.t, raw.d, peerId);
     });
     conn.on('close', () => this._dropped(peerId));
@@ -217,6 +292,7 @@ export class Net {
   get peerIds() { return [...this.conns.keys()].filter((id) => id !== this.hostId || this.isHost); }
 
   destroy() {
+    clearInterval(this._hb);
     try { this.peer?.destroy(); } catch { /* already gone */ }
     this.conns.clear();
     this.handlers.clear();

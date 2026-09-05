@@ -53,11 +53,11 @@ export const CHARACTERS = [
     color: 0x9fffc8,
     accent: 0x3fbf8a,
     silhouette: 'satchel',
-    passive: 'You pick people up in half the time, and you bleed out slower.',
+    passive: 'You pick people up in well under half the time, and you last far longer on the floor.',
     ability: 'Second wind',
     abilityText: 'Get yourself up off the floor. Once per run, and only once.',
     cooldown: 0,
-    stats: { reviveScale: 0.5, bleedScale: 1.6 },
+    stats: { reviveScale: 0.42, bleedScale: 1.9 },
   },
   {
     id: 'scavenger',
@@ -99,7 +99,7 @@ export const CHARACTERS = [
     ability: 'Shove',
     abilityText: 'Put it on the floor for five seconds. You have to be close enough to regret it.',
     cooldown: 55,
-    stats: { braces: 1, bleedScale: 1.3 },
+    stats: { braces: 1, bleedScale: 1.5 },
   },
 ];
 

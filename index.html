@@ -104,9 +104,7 @@
   .char-chip.selected { border-color: var(--chip); background: rgba(255,255,255,0.05); }
 
   #preview-wrap { display: grid; gap: 0.5rem; justify-items: center; }
-  #preview { width: 15rem; height: 17rem; cursor: grab; touch-action: none;
-             background: radial-gradient(ellipse at 50% 65%, rgba(255,255,255,0.035), transparent 70%); }
-  #preview:active { cursor: grabbing; }
+  #preview-wrap, #shop-preview-wrap { padding-top: 40vh; }
   #char-name { font-size: 1.1rem; letter-spacing: 0.1em; }
   #char-tag { color: var(--ink-dim); font-size: 0.82rem; }
   .detail { width: min(30rem, 90vw); display: grid; gap: 0.3rem; font-size: 0.84rem;
@@ -121,6 +119,10 @@
   .player-row { display: flex; align-items: center; gap: 0.55rem; font-size: 0.88rem; }
   .player-row em { color: var(--ink-faint); font-size: 0.78rem; }
   .player-row b { margin-left: auto; font-weight: 400; color: var(--ink-faint); font-size: 0.76rem; }
+  .kick { width: 1.5rem; height: 1.5rem; flex: none; padding: 0; line-height: 1;
+          font: inherit; font-size: 1rem; cursor: pointer; color: var(--ink-faint);
+          background: none; border: 1px solid transparent; border-radius: 50%; }
+  .kick:hover { color: #e08a6a; border-color: rgba(224,138,106,0.5); }
   .player-row.is-ready b { color: var(--exit); }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   #code-line { font-size: 0.82rem; color: var(--ink-dim); text-align: center; }
@@ -184,6 +186,10 @@
   #hud { position: fixed; left: 1.6rem; bottom: 1.4rem; z-index: 10; pointer-events: none; user-select: none; }
   #hud-room { font-size: 1.25rem; letter-spacing: 0.16em; opacity: 0.55;
               text-shadow: 0 1px 12px rgba(0,0,0,0.9); }
+  #hud-room.safe { color: var(--exit); opacity: 0.85; }
+  #safe-tag { margin-top: 0.15rem; font-size: 0.74rem; color: var(--exit);
+              opacity: 0.75; letter-spacing: 0.06em;
+              text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
   #carry-line { margin-top: 0.3rem; font-size: 0.8rem; color: var(--ink-dim);
                 text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
   #hud-carry { color: var(--ember); }
@@ -313,6 +319,7 @@
     background: linear-gradient(100deg,
       rgba(5,7,10,0.95) 0%, rgba(5,7,10,0.88) 26%,
       rgba(5,7,10,0.45) 52%, rgba(5,7,10,0.05) 74%, transparent 90%);
+    touch-action: none;
     align-items: flex-start; text-align: left;
     padding: 2rem clamp(1.5rem, 7vw, 5.5rem);
     gap: 1.1rem;
@@ -376,9 +383,7 @@
      figure sliding off the top of a scrolled page is worse than no preview. */
   #shop-preview-wrap { display: grid; gap: 0.4rem; justify-items: center;
                        position: sticky; top: 50%; transform: translateY(-50%); }
-  #shop-preview { width: 15rem; height: 17rem; cursor: grab; touch-action: none;
-    background: radial-gradient(ellipse at 50% 65%, rgba(255,255,255,0.04), transparent 70%); }
-  #shop-preview:active { cursor: grabbing; }
+
   #shop-name { font-size: 1rem; letter-spacing: 0.1em; }
   #shop-tag { color: var(--ink-dim); font-size: 0.8rem; text-align: center; }
   .shop-card { cursor: pointer; }
@@ -400,7 +405,8 @@
               display: grid; place-content: center; justify-items: center; gap: 1rem; }
   #ad-modal-text { color: var(--ink); font-size: 1rem; letter-spacing: 0.06em; }
   #ad-modal .fine { max-width: 22rem; }
-  #ad-revive { margin-top: 0.6rem; pointer-events: auto; }
+  #ad-revive, #give-up { margin-top: 0.6rem; pointer-events: auto; }
+  #give-up { margin-top: 0.2rem; }
   #ad-revive-note { font-size: 0.74rem; color: #8a6a5f; }
 
   #vote { position: fixed; inset: 0; z-index: 28; background: rgba(20,3,2,0.9);
@@ -502,6 +508,7 @@
 
 <div id="hud" class="hidden">
   <div id="hud-room">Entrance</div>
+  <div id="safe-tag" class="hidden">nothing follows you in here</div>
   <div id="carry-line">carrying <span id="hud-carry">nothing</span></div>
   <div id="team"></div>
   <div id="stats">
@@ -540,6 +547,20 @@
     <button class="btn primary" id="te-done">Done</button>
     <button class="btn quiet" id="te-reset">Reset</button>
   </div>
+</div>
+
+<div id="crash" class="screen hidden" style="z-index:60">
+  <h1>It stopped</h1>
+  <p class="fine">Something failed and the house could not carry on.<br>
+    Reloading starts a fresh one; nothing banked is lost.</p>
+  <p id="crash-detail" class="fine" style="color:#e08a6a;max-width:32rem"></p>
+  <button class="btn primary" onclick="location.reload()">Reload</button>
+</div>
+
+<div id="ctxlost" class="screen hidden" style="z-index:59">
+  <h1>Interrupted</h1>
+  <p class="fine">The graphics context was taken away, usually by another app
+    or the phone sleeping.<br>It comes back on its own; give it a moment.</p>
 </div>
 
 <div id="rotate" class="hidden">
@@ -589,16 +610,19 @@
   <span id="downed-note">Someone has to come and pick you up.</span>
   <button class="btn hidden" id="ad-revive">Watch an ad and get up</button>
   <span id="ad-revive-note"></span>
+  <button class="btn quiet hidden" id="give-up">Give up</button>
 </div>
 
 <div id="vote" class="hidden">
   <h2>ALL DOWN</h2>
-  <p class="fine">Everyone has to watch one. If a single person refuses, the house keeps you.</p>
+  <p class="fine">Nobody is left standing to pick anyone up.<br>
+    Every one of you has to watch an ad to get back up. If a single person
+    refuses, the run ends and you go back to the lobby.</p>
   <div id="vote-timer">30</div>
   <div id="vote-list"></div>
   <div class="row-h">
-    <button class="btn primary" id="vote-watch">Watch an ad</button>
-    <button class="btn quiet" id="vote-quit">Give up the run</button>
+    <button class="btn primary" id="vote-watch">Watch an ad and get everyone up</button>
+    <button class="btn quiet" id="vote-quit">Give up, back to the lobby</button>
   </div>
 </div>
 
@@ -628,6 +652,7 @@
     <button id="exit">Exit</button>
   </div>
   <p class="fine" style="text-align:left">
+    <span id="build" style="opacity:0.5"></span><br>
     Nothing you do here leaves your machine except your position and your voice,
     and those go only to the people whose room code you typed.
     <br>No account, no server, no analytics. Full details under About.
@@ -682,7 +707,6 @@
       </div>
     </div>
     <div id="preview-wrap">
-      <canvas id="preview"></canvas>
       <div id="char-name"></div>
       <div id="char-tag"></div>
     </div>
@@ -709,7 +733,6 @@
   <div id="shop-body">
     <div id="shop-list"></div>
     <div id="shop-preview-wrap">
-      <canvas id="shop-preview"></canvas>
       <div id="shop-name"></div>
       <div id="shop-tag"></div>
     </div>
@@ -764,6 +787,7 @@
       <input type="range" id="sensitivity" min="4" max="60">
     </div>
     <label class="check"><input type="checkbox" id="invert-y">Invert vertical look</label>
+    <label class="check"><input type="checkbox" id="crouch-toggle">Crouch toggles instead of being held</label>
     <button class="btn quiet hidden" id="open-touch-edit">Move the on-screen controls</button>
     <button class="btn quiet" id="reset-binds">Reset keys to defaults</button>
   </div>

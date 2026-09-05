@@ -22,6 +22,10 @@
 // A fixed count barely registered once houses got large: you could walk for
 // minutes without meeting anything.
 //
+// closetShare and boardShare are fractions of the room count. Closets scale
+// hard with difficulty: at one ghost per seven rooms there has to be somewhere
+// to get off the floor, and the harder houses are where you need it.
+//
 // hearsVoice lets them hear your microphone. On the harder houses, shouting
 // down the corridor is a real decision — the proximity chat that keeps you
 // coordinated is the same channel that gives you away.
@@ -29,6 +33,8 @@
 export const DIFFICULTIES = [
   {
     id: 'quiet',
+    closetShare: 0.1,
+    boardShare: 0.12,
     ghostShare: 0.15,
     hearsVoice: false,
     label: 'Quiet',
@@ -47,6 +53,8 @@ export const DIFFICULTIES = [
   },
   {
     id: 'restless',
+    closetShare: 0.15,
+    boardShare: 0.15,
     ghostShare: 0.15,
     hearsVoice: false,
     label: 'Restless',
@@ -65,6 +73,8 @@ export const DIFFICULTIES = [
   },
   {
     id: 'hunted',
+    closetShare: 0.25,
+    boardShare: 0.18,
     ghostShare: 0.15,
     hearsVoice: true,
     label: 'Hunted',
@@ -83,6 +93,8 @@ export const DIFFICULTIES = [
   },
   {
     id: 'starving',
+    closetShare: 0.3,
+    boardShare: 0.22,
     ghostShare: 0.15,
     hearsVoice: true,
     label: 'Starving',

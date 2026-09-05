@@ -292,11 +292,9 @@ export class TouchControls {
   _press(action) {
     if (!this.player) return;
     this.player.touchActions.add(action);
-    // Momentary actions fire on press, exactly as a key does. Held ones only
-    // need to be in the set; the player polls for those.
-    if (action === 'flashlight') this.player.onFlashToggle?.();
-    if (action === 'power') this.player.onPower?.();
-    if (action === 'interact') this.player.onInteract?.();
+    // One press path for keys and buttons, so a crouch toggle behaves the same
+    // whichever you use.
+    this.player.pressAction?.(action);
   }
 
   attach(player) {

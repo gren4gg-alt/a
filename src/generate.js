@@ -241,6 +241,17 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
   entrance.name = 'Entrance';
   exit.name = 'The way out';
 
+  // The room you wake up in is sanctuary. Nothing follows you in, and nothing
+  // notices you while you are stood in it. Marked on the room, on its nav node
+  // and as a bare rectangle, because the ghost needs all three: to refuse to
+  // path there, to refuse to wander there, and to refuse to walk in anyway.
+  entrance.isSafe = true;
+  const safeNode = nav.nodes.get(entrance.id);
+  if (safeNode) safeNode.isSafe = true;
+  const safeRoom = {
+    x0: entrance.x0, z0: entrance.z0, x1: entrance.x1, z1: entrance.z1,
+  };
+
   // -- 6. Lights ------------------------------------------------------------
 
   const lights = [];
@@ -338,7 +349,7 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
   const closetRooms = rooms.filter((r) => !r.isCorridor && r.id !== entrance.id && !r.isExit);
   shuffle(closetRooms, rand);
   const closets = [];
-  const closetTarget = Math.max(2, Math.round(cols * rows * 0.10));
+  const closetTarget = Math.max(2, Math.round(cols * rows * (difficulty.closetShare ?? 0.10)));
   const propsByRoom = new Map();
   for (const pr of props) {
     if (!propsByRoom.has(pr.room)) propsByRoom.set(pr.room, []);
@@ -400,7 +411,7 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
   );
   shuffle(boardRooms, rand);
   const boards = [];
-  const boardTarget = Math.max(2, Math.round(cols * rows * 0.09));
+  const boardTarget = Math.max(2, Math.round(cols * rows * (difficulty.boardShare ?? 0.12)));
   for (const r of boardRooms) {
     if (boards.length >= boardTarget) break;
     const blockers = [...(propsByRoom.get(r.id) ?? []), ...(placed.get(r.id) ?? [])];
@@ -508,6 +519,7 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
     rooms, doors, lights, props, loot, nav,
     entranceId: entrance.id,
     exitId: exit.id,
+    safeRoom,
     closets,
     relics,
     holders,
@@ -813,11 +825,12 @@ class MinHeap {
 
 /**
  * A* over the nav graph.
+ * @param allowSafe false for the ghost, which cannot enter the entrance.
  * @param allowCrawl false for the ghost, which is too tall for the tunnels.
  *   Colliders enforce this physically as well; refusing the edges here just
  *   stops it planning a route it would then stand and grind against.
  */
-export function findPath(nav, fromId, toId, allowCrawl = true) {
+export function findPath(nav, fromId, toId, allowCrawl = true, allowSafe = true) {
   if (fromId === toId) return [];
   const goal = nav.nodes.get(toId);
   if (!goal) return [];
@@ -837,6 +850,7 @@ export function findPath(nav, fromId, toId, allowCrawl = true) {
     const base = g.get(cur);
     for (const e of node.edges) {
       if (!allowCrawl && e.crawl) continue;
+      if (!allowSafe && nav.nodes.get(e.to)?.isSafe) continue;
       const tentative = base + e.cost;
       if (g.has(e.to) && tentative >= g.get(e.to)) continue;
       g.set(e.to, tentative);

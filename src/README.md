@@ -66,7 +66,7 @@ push to talk). Defaults:
 |---|---|
 | W A S D | move · **Shift** run |
 | F | flashlight |
-| Ctrl | crouch |
+| C | crouch (or a toggle, under Controls) |
 | Q | your character's ability |
 | E | hold to pick a downed teammate up |
 | V | push to talk |
@@ -169,7 +169,19 @@ Three of them, chosen per terminal:
   formality you fail. Never produces a negative answer.
 - **Match the plate** — swap blocks until the row matches the plate above it.
 
-## Shop
+## Shop and character select
+
+Both screens **are** a dark room, full screen, with the list overlaid on the
+left and the figure standing right of centre. Real lights rather than the baked
+pipeline — it is six boxes and one figure — with a warm lamp low and to one side,
+a cold fill behind, and the same skirting and picture rail the house shader
+draws, because a brown box without them reads as one continuous surface. The
+lamp takes a tint from whoever is standing there. Drag the background to turn
+them; double-click to let it spin again.
+
+This replaced two small canvas turntables. **Three live WebGL contexts is a real
+cost on a phone** — browsers cap them and quietly drop the oldest — so
+consolidating to one mattered more than the code it saved.
 
 Characters cost shards. The Lamplighter is free forever — there has to be
 someone to play as before anyone has earned anything.
@@ -222,9 +234,40 @@ The rules, printed on the wall of the room you start in, so somebody who has
 never opened the menu still knows the house wants four things and that the
 screens are loud.
 
+## The entrance is sanctuary
+
+The room you wake up in is safe. Nothing follows you in, and nothing notices you
+while you are standing in it — so it is somewhere to regroup, count who is left,
+and decide, rather than just where the run happens to begin.
+
+Making that actually true took three separate refusals, because any one of them
+alone leaves a gap:
+
+- **The nav graph** marks the entrance node, and ghost pathfinding skips it. 292
+  sampled ghost routes, zero passing through.
+- **Wandering** never picks it as a destination, so it is not reachable by
+  accident either.
+- **Local steering** is the backstop. A ghost heading for a waypoint can drift
+  across a threshold the graph never routed it through, so the move is refused
+  outright at the position level. Driven straight at the middle of the room for
+  40 seconds with its velocity forced inward every frame, it never got in.
+
+Sensing is separate again: a player inside is skipped entirely, not merely
+unreachable. Without that it would stand in the doorway watching, and be waiting
+the moment you stepped out. Lures pointing inside are discarded for the same
+reason. Step one metre out and it picks you up immediately.
+
+The room name turns green and says so, and the notice on the wall says it too.
+
 ## Closets
 
-One per ten rooms, one person each. Inside you are invisible to every sense
+Scaled to the house: **10% of rooms on Quiet, 15% on Restless, 25% on Hunted and
+30% on Starving** — verified exact across five seeds each. At one ghost per seven rooms there has to be somewhere to get
+off the floor, and the harder houses are where you need it. Blackboards scale
+too, 12% up to 22%. Both hit their target share within three points on every
+house tested.
+
+One person each. Inside you are invisible to every sense
 they have and you watch through the peephole; your view is a slit and you cannot
 turn far. From outside, a lit peephole means it is already taken.
 
@@ -551,6 +594,25 @@ reconciliation is the right answer for a competitive game; here it buys a lot of
 complexity to defend against someone who can only grief their own friends, and
 local movement feels perfect this way.
 
+**One person can only occupy one slot.** PeerJS hands out a new peer id on every
+page load, so a player who refreshed arrived as a stranger while their old
+connection sat in the roster until it timed out — which is how the same person
+appeared twice. Each browser now carries a stable session id in localStorage,
+and the host recognises a reconnect and replaces the stale entry.
+
+The other half of that bug was in the transport: each of the two data channels
+fires its own `open` event, and if the second was already open when its handler
+attached, `joined` fired twice. It is now guarded by an `announced` flag and
+verified across all four open-ordering cases.
+
+A heartbeat runs every 3 seconds with a 12 second timeout, because PeerJS can
+take a very long time to notice a browser that was closed or put to sleep, and a
+ghost in the roster holds a slot and stalls the ready check forever.
+
+**The host can remove people.** A × beside every other player in the lobby. The
+reason reaches them before the socket closes, so they see why rather than an
+unexplained disconnect.
+
 **The room locks when the host goes in.** Everyone spawns together in the
 entrance, nobody can join a run in progress, and only the host can commit. Joins
 are refused *before* the connection is wired up, so a rejected peer never enters
@@ -603,9 +665,37 @@ superstition.
 
 **Escaping together.** Every player still standing must be in the exit room and
 nobody may be down. A knocked-out teammate has to be revived or written off
-before the door opens. Downed players bleed out in 26 seconds; revive is holding
-**E** within 2.2 m for 3.2 seconds, and the host validates the distance rather
-than trusting the claim.
+before the door opens. Downed players bleed out in **55 seconds** and revive is holding the use key
+within 2.2 m for **5 seconds**, with the host validating the distance rather
+than trusting the claim. Both were roughly doubled: with one ghost per seven
+rooms a teammate often has most of a house to cross, and the old 26 seconds
+meant most attempts were pointless before they started.
+
+The two characters that touch those numbers were scaled to match rather than
+left behind — the Nurse now picks people up in 2.1 s and lasts 105 s on the
+floor; the Warden lasts 83 s.
+
+**Whatever puts you down then leaves.** Every ghost within 30 m loses interest
+in that spot for 14 seconds and actively wanders away from it. Without that it
+stands over the body, nobody can get close enough to help, and one mistake ends
+the run. Shutting a closet door does the same for 9 seconds — it gives up and
+goes elsewhere rather than waiting outside the one exit you have.
+
+Playing alone, the downed screen offers **Give up** rather than making you watch
+a 55-second timer you already know the end of, alongside your three ad revives.
+
+**In multiplayer, everyone being down opens the vote immediately** — not after
+watching four separate timers expire one at a time. Nobody left standing can
+pick anybody up, so the run is already over and the choice may as well be
+offered. Bleed-out is paused while the vote is open, so nobody dies mid-decision.
+
+Both options are on that screen: every player watches an ad and everyone gets up
+with immunity, or one refusal ends it and you all go back to the lobby. It has
+to be unanimous — one person paying for five is not a group decision.
+
+Solo deliberately never sees that screen. A unanimous vote with one voter is the
+same choice in worse words, and it would replace a panel that already has both
+buttons on it.
 
 ### Before you ship this publicly
 
@@ -626,6 +716,48 @@ is only used to introduce peers — all gameplay traffic is direct.
   bake, so give them a small material that samples the two or three nearest
   baked lights per object.
 - Gravity, stairs, vaulting. The floor is flat.
+
+## Checking the DOM wiring
+
+```
+node tools/check-dom.js       # every el.<name> and every id resolves
+node tools/check-downed.js    # the downed / last-stand wiring is present
+```
+
+Verifies that every `el.<name>` used in `main.js` is defined in the `el` literal,
+that every id either looks up exists in `index.html`, and that nothing is
+defined but unused. Currently 96 properties, 146 lookups, all resolved.
+
+`check-downed.js` exists for a different reason: that flow is DOM and state, so
+it cannot be driven headlessly, and a patch that silently fails to apply leaves
+a button that never appears. It has happened twice. The check asserts the wiring
+is actually in the file rather than trusting that an edit landed.
+
+`check-dom.js` is worth having because the failure mode is brutal: a missing handle throws at
+module load, so the page is blank with one line in the console and *nothing*
+works, not just the feature that lost its element. One of these got shipped by a
+`sed` that deleted a whole line which happened to hold three properties.
+
+## When things go wrong
+
+A WebGL game that throws leaves a black screen and no explanation, and the
+player has no console open. So:
+
+- **Uncaught errors and rejected promises** surface a readable panel with a
+  reload button, rather than a frozen frame.
+- **The render loop is wrapped**, so one bad frame reports itself instead of
+  killing the animation callback silently.
+- **Lost GPU contexts are handled.** This is routine on mobile — another app
+  takes the context, or the phone sleeps. Without `preventDefault` the browser
+  never restores it and the page is simply dead. On restore, every GPU object
+  died with the context, so the run is torn down and you are returned to the
+  lobby, which is honest; silently carrying on is not.
+- **A backgrounded tab** goes quiet and releases the cursor, but keeps
+  simulating in multiplayer, because the host cannot pause on everyone else's
+  behalf. The frame clock resets on return so the absence is not integrated in
+  one enormous step.
+- **`pagehide` tears down the peer**, since a browser that vanishes without
+  closing sits in everyone else's roster until the heartbeat times it out.
 
 ---
 

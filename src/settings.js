@@ -8,7 +8,7 @@ import { CONFIG } from './level.js';
 // scattered across modules, so a change lands everywhere at once.
 // ---------------------------------------------------------------------------
 
-const KEY = 'darkhouse.settings.v7';
+const KEY = 'darkhouse.settings.v8';
 
 export const QUALITY = {
   potato: {
@@ -58,7 +58,7 @@ export const BINDABLE = [
   { id: 'left',       label: 'Step left',        def: 'KeyA' },
   { id: 'right',      label: 'Step right',       def: 'KeyD' },
   { id: 'sprint',     label: 'Run',              def: 'ShiftLeft' },
-  { id: 'crouch',     label: 'Crouch',           def: 'ControlLeft' },
+  { id: 'crouch',     label: 'Crouch',           def: 'KeyC' },
   { id: 'flashlight', label: 'Flashlight',       def: 'KeyF' },
   { id: 'interact',   label: 'Pick someone up',  def: 'KeyE' },
   { id: 'power',      label: 'Use your ability', def: 'KeyQ' },
@@ -76,7 +76,12 @@ const DEFAULTS = () => ({
   volume: { master: 0.8, sfx: 0.9, ambience: 0.8, voice: 1.0 },
   voice: { pushToTalk: true, inputGain: 1.0 },
   graphics: { quality: onTouch ? 'potato' : 'balanced', fov: onTouch ? 78 : 74 },
-  input: { sensitivity: onTouch ? 3.4 : 2.2, invertY: false },
+  input: {
+    sensitivity: onTouch ? 3.4 : 2.2,
+    invertY: false,
+    // Hold to crouch by default; a toggle suits long crawls through tunnels.
+    crouchToggle: false,
+  },
   binds: Object.fromEntries(BINDABLE.map((b) => [b.id, b.def])),
   touch: {
     layout: JSON.parse(JSON.stringify(TOUCH_DEFAULTS)),

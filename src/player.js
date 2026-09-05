@@ -95,6 +95,7 @@ export class Player {
 
     this.downed = false;
     this.crouching = false;
+    this.crouchLatched = false;
     this.hiding = null;        // the closet you are inside, if any
     this.snaredUntil = 0;
     this.keys = new Set();
@@ -116,6 +117,23 @@ export class Player {
     return !!code && this.keys.has(code);
   }
 
+  /**
+   * What happens the moment an action is pressed, as opposed to held.
+   * Shared by the keyboard and the on-screen buttons so both behave the same.
+   */
+  pressAction(action) {
+    if (!action) return;
+    if (action === 'stats') this.onDebugToggle?.();
+    if (action === 'flashlight') this.onFlashToggle?.();
+    if (action === 'power') this.onPower?.();
+    // Interact fires on press; holding the same key revives a downed teammate
+    // instead, and useNearest() defers when a body is in reach.
+    if (action === 'interact') this.onInteract?.();
+    if (action === 'crouch' && settings.data.input.crouchToggle) {
+      this.crouchLatched = !this.crouchLatched;
+    }
+  }
+
   /** Look, in the same units as a mouse delta. Used by the touch look zone. */
   applyLook(dx, dy) {
     const sens = settings.data.input.sensitivity * 0.001;
@@ -132,13 +150,7 @@ export class Player {
     // need the listeners rebuilt.
     const press = (code, down) => {
       if (down) {
-        const action = settings.actionFor(code);
-        if (action === 'stats') this.onDebugToggle?.();
-        if (action === 'flashlight') this.onFlashToggle?.();
-        if (action === 'power') this.onPower?.();
-        // Fires on press. Holding the same key reviews a downed teammate
-        // instead; useNearest() defers when a body is in reach.
-        if (action === 'interact') this.onInteract?.();
+        this.pressAction(settings.actionFor(code));
         this.keys.add(code);
       } else {
         this.keys.delete(code);
@@ -222,7 +234,9 @@ export class Player {
     // Crouch. You may always go down; standing up requires the headroom, which
     // is checked against the same colliders rather than against a flag, so you
     // simply cannot stand inside a crawl tunnel.
-    const wantsCrouch = this.held('crouch');
+    const wantsCrouch = settings.data.input.crouchToggle
+      ? this.crouchLatched
+      : this.held('crouch');
     if (wantsCrouch) this.crouching = true;
     else if (this.crouching && !blocked(this.pos.x, this.pos.z, CONFIG.playerRadius, CONFIG.standClearance, grid)) {
       this.crouching = false;

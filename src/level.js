@@ -20,6 +20,9 @@ export const CONFIG = {
 
   playerRadius: 0.35,
   eyeHeight: 1.62,
+  // Seconds on the floor before you bleed out. Generous on purpose: with one
+  // ghost per seven rooms, a teammate often has most of a house to cross.
+  bleedOutSeconds: 55,
   crouchEyeHeight: 0.75,
   hideEyeHeight: 1.35,      // at the peephole, not on the closet floor
   standClearance: 1.8,      // a collider shorter than this only blocks standing
@@ -32,8 +35,8 @@ export const CONFIG = {
   // bake stays under a couple of seconds.
   bakeStep: 0.34,
   bakeStepScale: 1.0,   // set from the graphics quality preset
-  ambient: 0.01,
-  shadowLeak: 0.05,
+  ambient: 0.018,
+  shadowLeak: 0.10,
 
   // How many world metres one texture tile covers. Lower = finer detail.
   // Metres of world covered by one texture tile, per surface. Overridable in

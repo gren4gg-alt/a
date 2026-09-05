@@ -134,6 +134,14 @@ export function buildSettingsUI({ onChange, onTest }) {
     settings.save();
   });
 
+  const crouchToggle = $('crouch-toggle');
+  crouchToggle.checked = settings.data.input.crouchToggle;
+  crouchToggle.addEventListener('change', () => {
+    settings.data.input.crouchToggle = crouchToggle.checked;
+    settings.save();
+    onChange?.();
+  });
+
   $('reset-binds').addEventListener('click', () => {
     for (const b of BINDABLE) settings.data.binds[b.id] = b.def;
     settings.save();
@@ -192,6 +200,7 @@ export function buildSettingsUI({ onChange, onTest }) {
     sens.value = String(Math.round(settings.data.input.sensitivity * 10));
     sensOut.textContent = settings.data.input.sensitivity.toFixed(1);
     invert.checked = settings.data.input.invertY;
+    crouchToggle.checked = settings.data.input.crouchToggle;
     fov.value = String(settings.data.graphics.fov);
     fovOut.textContent = `${fov.value}°`;
     renderBinds();

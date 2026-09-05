@@ -1,138 +1,13 @@
 import * as THREE from 'three';
 
 // ---------------------------------------------------------------------------
-// Character preview.
+// The character silhouettes.
 //
-// Its own small renderer on its own canvas rather than a corner of the game
-// view: the selection screen is a DOM overlay, and threading a second camera
-// through the main render loop just to draw a mannequin costs more complexity
-// than a second context costs performance. It is created when the screen opens
-// and disposed when it closes, so there is never a spare context during play.
-//
-// Unlike the maze, this scene uses real lights. Nothing here is baked, it is
-// six triangle-thin figures on a turntable, and standard materials look far
-// better than the unlit shader the house needs.
+// Previously this also owned a small turntable renderer, used twice. Both
+// screens now render into one full-screen room instead (charroom.js), which
+// removed two live WebGL contexts — browsers cap those and quietly drop the
+// oldest, and on a phone the cap is low.
 // ---------------------------------------------------------------------------
-
-export class CharacterPreview {
-  constructor(canvas) {
-    this.canvas = canvas;
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.setClearColor(0x000000, 0);
-
-    this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(34, 1, 0.1, 40);
-    this.camera.position.set(0, 1.15, 4.6);
-    this.camera.lookAt(0, 0.95, 0);
-
-    const key = new THREE.DirectionalLight(0xfff0dd, 2.1);
-    key.position.set(2.5, 4, 3);
-    const rim = new THREE.DirectionalLight(0x7fb4ff, 1.5);
-    rim.position.set(-3, 2, -2.5);
-    this.scene.add(key, rim, new THREE.AmbientLight(0x404a58, 1.1));
-
-    this.floor = new THREE.Mesh(
-      new THREE.CircleGeometry(1.0, 40),
-      new THREE.MeshBasicMaterial({ color: 0x11151c, transparent: true, opacity: 0.7 }),
-    );
-    this.floor.rotation.x = -Math.PI / 2;
-    this.scene.add(this.floor);
-
-    this.figure = new THREE.Group();
-    this.scene.add(this.figure);
-
-    this.yaw = 0.5;
-    this.autoSpin = true;
-    this.dragging = false;
-    this.lastX = 0;
-    this.running = false;
-
-    this._bindDrag();
-  }
-
-  _bindDrag() {
-    const down = (x) => { this.dragging = true; this.autoSpin = false; this.lastX = x; };
-    const move = (x) => {
-      if (!this.dragging) return;
-      this.yaw += (x - this.lastX) * 0.011;
-      this.lastX = x;
-    };
-    const up = () => { this.dragging = false; };
-
-    this.canvas.addEventListener('pointerdown', (e) => { down(e.clientX); this.canvas.setPointerCapture(e.pointerId); });
-    this.canvas.addEventListener('pointermove', (e) => move(e.clientX));
-    this.canvas.addEventListener('pointerup', up);
-    this.canvas.addEventListener('pointercancel', up);
-    this.canvas.addEventListener('dblclick', () => { this.autoSpin = true; });
-  }
-
-  show(character) {
-    this.figure.clear();
-    this.figure.add(buildFigure(character));
-    this.resize();
-    this._frame();
-    if (!this.running) { this.running = true; this._loop(); }
-  }
-
-  /**
-   * Measure the figure and place the camera to fit it, rather than assuming a
-   * size. The hand-tuned camera left everyone floating high in the frame, and
-   * it would have been wrong for every supplied player.glb as well.
-   */
-  _frame() {
-    const box = new THREE.Box3().setFromObject(this.figure);
-    if (box.isEmpty()) return;
-    const size = new THREE.Vector3();
-    const centre = new THREE.Vector3();
-    box.getSize(size);
-    box.getCenter(centre);
-
-    // Fit the taller of the two constraints, with a margin, so a wide figure
-    // is not cropped on a narrow canvas.
-    const fovV = THREE.MathUtils.degToRad(this.camera.fov);
-    const fovH = 2 * Math.atan(Math.tan(fovV / 2) * this.camera.aspect);
-    const distV = (size.y / 2) / Math.tan(fovV / 2);
-    const distH = (Math.max(size.x, size.z) / 2) / Math.tan(fovH / 2);
-    const dist = Math.max(distV, distH) * 1.45 + 0.6;
-
-    this.pivotY = centre.y;
-    this.camera.position.set(0, centre.y + size.y * 0.06, dist);
-    this.camera.lookAt(0, centre.y, 0);
-
-    // The turntable disc sits under the feet, wherever they turn out to be.
-    if (this.floor) {
-      this.floor.position.y = box.min.y + 0.005;
-      this.floor.scale.setScalar(Math.max(0.5, Math.max(size.x, size.z) * 0.9));
-    }
-  }
-
-  resize() {
-    const w = this.canvas.clientWidth || 260;
-    const h = this.canvas.clientHeight || 320;
-    this.renderer.setSize(w, h, false);
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
-    // Re-fit: the framing depends on aspect, so a resize changes it.
-    if (this.figure?.children.length) this._frame();
-  }
-
-  _loop() {
-    if (!this.running) return;
-    requestAnimationFrame(() => this._loop());
-    if (this.autoSpin && !this.dragging) this.yaw += 0.006;
-    this.figure.rotation.y = this.yaw;
-    this.renderer.render(this.scene, this.camera);
-  }
-
-  dispose() {
-    this.running = false;
-    this.figure.traverse((o) => {
-      if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
-    });
-    this.renderer.dispose();
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Figures built from primitives. Each silhouette differs enough to be
@@ -140,7 +15,7 @@ export class CharacterPreview {
 // in game you see a coloured capsule and a bead of light, not a face.
 // ---------------------------------------------------------------------------
 
-function buildFigure(c) {
+export function buildFigure(c) {
   const g = new THREE.Group();
   const body = new THREE.MeshStandardMaterial({ color: c.color, roughness: 0.62, metalness: 0.08 });
   const trim = new THREE.MeshStandardMaterial({ color: c.accent, roughness: 0.45, metalness: 0.25 });

@@ -136,7 +136,9 @@ function shortestAngle(from, to) {
 
 // ---------------------------------------------------------------------------
 
-export const REVIVE_SECONDS = 3.2;
+// Long enough that reaching someone across a room is the hard part, not the
+// holding. Paired with a much longer bleed-out so the attempt is worth making.
+export const REVIVE_SECONDS = 5.0;
 export const REVIVE_RANGE = 2.2;
 
 /**

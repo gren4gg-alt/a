@@ -61,6 +61,14 @@ export class Ghost {
     this.rage = 0;
     this.target = null;
     this.stun = 0;
+    this.avoid = null;
+    this.avoidUntil = 0;
+    // Padded outward: standing in the doorway with an arm through it would
+    // technically be outside the rectangle and would still reach someone.
+    this.safe = level.safeRoom
+      ? { x0: level.safeRoom.x0 - 0.7, z0: level.safeRoom.z0 - 0.7,
+          x1: level.safeRoom.x1 + 0.7, z1: level.safeRoom.z1 + 0.7 }
+      : null;
 
     this.knives = [];
     // Traps themselves are owned by the game, not by the ghost that left them:
@@ -117,6 +125,20 @@ export class Ghost {
       return;
     }
 
+    // Backing off. Standing over a body, or over the closet someone just shut
+    // themselves into, turns a setback into a dead end: nobody can reach the
+    // downed player and nobody can come out. It loses interest and wanders.
+    this._avoiding = time < this.avoidUntil;
+    if (this._avoiding) {
+      if (this.state !== STATE.WANDER) {
+        this.state = STATE.WANDER;
+        this.alert = 0;
+        this.lastSeen = null;
+        this.path = [];
+        this.repathIn = 0;
+      }
+    }
+
     // -- senses ------------------------------------------------------------
     //
     // Pick a target rather than tracking a fixed one: sight wins over sound,
@@ -130,6 +152,11 @@ export class Ghost {
       // undetectable is the Quiet One's ability: not invisible to the renderer,
       // simply absent from every sense the ghost has.
       if (pl.downed || pl.dead || pl.undetectable) continue;
+      if (time < this.avoidUntil) continue;      // deliberately not looking
+      // Stood in the entrance: not seen, not heard, not a target. The room is
+      // a place to regroup, and that is worth nothing if it can still watch
+      // you from the doorway and be waiting when you step out.
+      if (this.inSafe(pl.pos.x, pl.pos.z)) continue;
       const d = Math.hypot(pl.pos.x - this.pos.x, pl.pos.z - this.pos.z);
       // The early-out has to allow for the loudest anyone can possibly be, or
       // it rejects them before the check that would have heard them. Sprinting
@@ -205,7 +232,7 @@ export class Ghost {
         goalId = this._randomNode();
       }
       if (goalId) {
-        const path = findPath(this.nav, this.nodeId, goalId, false);
+        const path = findPath(this.nav, this.nodeId, goalId, false, false);
         if (path.length) this.path = path;
       }
       if (this.state === STATE.INVESTIGATE && !this.lastSeen) this.state = STATE.WANDER;
@@ -233,8 +260,17 @@ export class Ghost {
     let nx = this.pos.x + this.vel.x * dt;
     let nz = this.pos.z + this.vel.z * dt;
     [nx, nz] = resolveCircle(nx, nz, 0.4, grid, GHOST_HEIGHT);
-    this.pos.x = nx;
-    this.pos.z = nz;
+    // The nav graph already refuses to route through the entrance, but local
+    // steering towards a waypoint can still drift across the threshold. This
+    // is the backstop that makes "it cannot come in" true rather than likely.
+    if (this.inSafe(nx, nz)) {
+      this.vel.set(0, 0, 0);
+      this.path = [];
+      this.repathIn = 0;
+    } else {
+      this.pos.x = nx;
+      this.pos.z = nz;
+    }
 
     // Face where it is going; face you when it is hunting.
     // Face the target when hunting, otherwise face travel direction. px/pz
@@ -276,10 +312,26 @@ export class Ghost {
     // would leave it grinding against a lintel until the next repath.
     if (!this._walkable) {
       this._walkable = [];
-      for (const [id, node] of this.nav.nodes) if (!node.isTunnel) this._walkable.push(id);
+      for (const [id, node] of this.nav.nodes) {
+        if (!node.isTunnel && !node.isSafe) this._walkable.push(id);
+      }
     }
     const pool = this._walkable;
     if (!pool.length) return null;
+
+    // While backing off, head for whichever of the samples is furthest from
+    // the place it is avoiding — otherwise "wander" leaves it circling the
+    // body it was told to leave alone.
+    if (this.avoid && this._avoiding) {
+      let far = null, farD = -1;
+      for (let k = 0; k < 6; k++) {
+        const id = pool[(Math.random() * pool.length) | 0];
+        const n = this.nav.nodes.get(id);
+        const d = Math.hypot(n.x - this.avoid.x, n.z - this.avoid.z);
+        if (d > farD) { farD = d; far = id; }
+      }
+      if (far) return far;
+    }
 
     // Sample a handful and take whichever is nearest home. Uniform picks would
     // send each ghost across the whole maze and they would all end up mixed
@@ -373,6 +425,12 @@ export class Ghost {
     return null;
   }
 
+  /** Is this point inside the sanctuary the ghost is barred from? */
+  inSafe(x, z) {
+    const s = this.safe;
+    return !!s && x > s.x0 && x < s.x1 && z > s.z0 && z < s.z1;
+  }
+
   _nearest(players) {
     let best = Infinity;
     for (const pl of players) {
@@ -413,6 +471,22 @@ export class Ghost {
     this.mesh.position.set(this.pos.x, Math.sin(time * 1.4) * 0.05, this.pos.z);
   }
 
+  /**
+   * Lose interest in a place and walk away from it for a while.
+   * @param seconds how long it stays disinterested
+   * @param now the simulation clock, since the ghost has no other reference
+   */
+  retreat(x, z, seconds, now) {
+    if (this.inSafe(x, z)) return;
+    this.avoid = { x, z };
+    this.avoidUntil = Math.max(this.avoidUntil, now + seconds);
+    this.state = STATE.WANDER;
+    this.alert = 0;
+    this.lastSeen = null;
+    this.path = [];
+    this.repathIn = 0;
+  }
+
   /** Warden's shove. Also drops whatever it was chasing. */
   shove(seconds, fromX, fromZ) {
     this.stun = Math.max(this.stun, seconds);
@@ -425,6 +499,7 @@ export class Ghost {
 
   /** Something loud and bright over there. Go and look at it. */
   lure(x, z) {
+    if (this.inSafe(x, z)) return;      // nothing in there concerns it
     this.lastSeen = { x, z };
     this.alert = 0;
     this.state = STATE.INVESTIGATE;
