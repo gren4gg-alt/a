@@ -32,8 +32,8 @@ export const CONFIG = {
   // bake stays under a couple of seconds.
   bakeStep: 0.34,
   bakeStepScale: 1.0,   // set from the graphics quality preset
-  ambient: 0.018,
-  shadowLeak: 0.10,
+  ambient: 0.01,
+  shadowLeak: 0.05,
 
   // How many world metres one texture tile covers. Lower = finer detail.
   // Metres of world covered by one texture tile, per surface. Overridable in

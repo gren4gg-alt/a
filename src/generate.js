@@ -82,7 +82,13 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
     for (let i = 0; i < cols; i++) {
       const cx = i * GEN.plotW + GEN.plotW / 2;
       const cz = j * GEN.plotD + GEN.plotD / 2;
-      const cat = pickWeighted(CATEGORIES, rand);
+      // Plot (0,0) is the entrance, and six people have to spawn in it
+      // without standing inside each other or inside a wall. A closet-sized
+      // entrance was how players ended up outside the room entirely.
+      const isEntrance = i === 0 && j === 0;
+      const cat = isEntrance
+        ? CATEGORIES.find((c) => c.id === 'large')
+        : pickWeighted(CATEGORIES, rand);
 
       const w = lerp(cat.w[0], cat.w[1], rand());
       const d = lerp(cat.d[0], cat.d[1], rand());
@@ -488,7 +494,17 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
   return {
     seed,
     difficulty: difficulty.id,
-    spawn: { x: mid(entrance.x0, entrance.x1), z: mid(entrance.z0, entrance.z1), yaw: Math.PI },
+    spawn: {
+      x: mid(entrance.x0, entrance.x1),
+      z: mid(entrance.z0, entrance.z1),
+      yaw: Math.PI,
+      // How far out the spawn ring may go before it meets a wall. Callers
+      // clamp to this instead of guessing a radius.
+      radius: Math.max(0, Math.min(
+        (entrance.x1 - entrance.x0) / 2,
+        (entrance.z1 - entrance.z0) / 2,
+      ) - 1.0),
+    },
     rooms, doors, lights, props, loot, nav,
     entranceId: entrance.id,
     exitId: exit.id,

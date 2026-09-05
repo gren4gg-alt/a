@@ -8,7 +8,7 @@ import { CONFIG } from './level.js';
 // scattered across modules, so a change lands everywhere at once.
 // ---------------------------------------------------------------------------
 
-const KEY = 'darkhouse.settings.v6';
+const KEY = 'darkhouse.settings.v7';
 
 export const QUALITY = {
   potato: {
@@ -31,6 +31,24 @@ export const QUALITY = {
     note: 'Finer baked light. Longer load, same frame rate.',
     pixelRatio: 1.5, drawDistance: 42, bakeScale: 0.85, aa: true,
   },
+};
+
+/**
+ * Default on-screen control layout, landscape.
+ *
+ * x and y are fractions of the viewport for the BUTTON CENTRE, so a layout
+ * survives a rotation or a different phone; size is in CSS pixels before the
+ * global scale. Laid out as a right-thumb arc with the one you press most in
+ * the middle of it, the way a shooter does it, rather than a neat grid nobody
+ * can reach the corners of.
+ */
+export const TOUCH_DEFAULTS = {
+  interact:   { x: 0.860, y: 0.700, size: 96 },
+  power:      { x: 0.745, y: 0.520, size: 74 },
+  sprint:     { x: 0.965, y: 0.480, size: 70 },
+  crouch:     { x: 0.965, y: 0.800, size: 70 },
+  flashlight: { x: 0.700, y: 0.855, size: 64 },
+  talk:       { x: 0.950, y: 0.150, size: 58 },
 };
 
 /** Order here is the order they appear in the controls screen. */
@@ -60,9 +78,18 @@ const DEFAULTS = () => ({
   graphics: { quality: onTouch ? 'potato' : 'balanced', fov: onTouch ? 78 : 74 },
   input: { sensitivity: onTouch ? 3.4 : 2.2, invertY: false },
   binds: Object.fromEntries(BINDABLE.map((b) => [b.id, b.def])),
+  touch: {
+    layout: JSON.parse(JSON.stringify(TOUCH_DEFAULTS)),
+    scale: 1.0,
+    opacity: 0.45,
+    stickSize: 132,
+    lockLandscape: true,
+  },
   name: '',
 });
 
+// Merging rather than replacing means a saved layout from an older build that
+// is missing a button still boots with that button in its default place.
 function deepMerge(base, patch) {
   if (!patch || typeof patch !== 'object') return base;
   for (const k of Object.keys(base)) {
@@ -96,6 +123,14 @@ class SettingsStore {
 
   reset() {
     this.data = DEFAULTS();
+    this.save();
+  }
+
+  resetTouchLayout() {
+    this.data.touch.layout = JSON.parse(JSON.stringify(TOUCH_DEFAULTS));
+    this.data.touch.scale = 1.0;
+    this.data.touch.opacity = 0.45;
+    this.data.touch.stickSize = 132;
     this.save();
   }
 

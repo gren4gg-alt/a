@@ -20,14 +20,14 @@ import { instanceScaled, has as hasModel } from './models.js';
 import { startMinigame, GAME_NAMES } from './minigames.js';
 import { ceilingColliders, roomVariant } from './build.js';
 import { MenuScene } from './menuscene.js';
-import { TouchControls, isTouchDevice } from './touch.js';
+import { TouchControls, isTouchDevice, lockLandscape, unlockOrientation, isPortrait } from './touch.js';
 import { BoardEditor } from './boards.js';
 import { showRewarded, initAds, adsEnabled, menuCooldownLeft, markMenuAdWatched,
          providerIsVerified, providerName } from './ads.js';
 import { AD_CONFIG } from './adsconfig.js';
 import { owns, buy, priceOf, firstOwned } from './shop.js';
 import { Audio } from './audio.js';
-import { Net, MSG } from './net.js';
+import { Net, MSG, PROTOCOL } from './net.js';
 import { Voice } from './voice.js';
 import { RemotePlayer, PLAYER_COLORS, reviveCandidate, REVIVE_SECONDS } from './remote.js';
 import { settings, keyLabel } from './settings.js';
@@ -69,6 +69,7 @@ const el = {
   adModal: $('ad-modal'), adModalText: $('ad-modal-text'),
   adRevive: $('ad-revive'), adReviveNote: $('ad-revive-note'),
   vote: $('vote'), voteList: $('vote-list'), voteTimer: $('vote-timer'),
+  touchEdit: $('touch-edit'), teWhich: $('te-which'), rotate: $('rotate'),
   voteWatch: $('vote-watch'), voteQuit: $('vote-quit'),
   carrying: $('carrying'), carryingName: $('carrying-name'),
   downed: $('downed'), downedTimer: $('downed-timer'), downedNote: $('downed-note'),
@@ -94,6 +95,7 @@ function show(name) {
   // sit there telling you to click.
   el.prompt.classList.toggle('hidden', TOUCH || !inGame || !!document.pointerLockElement);
   $('touch').classList.toggle('hidden', !TOUCH || !inGame);
+  if (TOUCH && !inGame) el.rotate.classList.add('hidden');
   if (!inGame) el.carrying.classList.add('hidden');
   $('fullscreen').classList.toggle('hidden', !inGame);
 }
@@ -230,6 +232,9 @@ const session = {
   ready: false,
 };
 
+/** Set the moment the host commits to a house. No joins after that. */
+let roomLocked = false;
+
 const isNet = () => session.mode !== 'solo';
 const isHost = () => session.mode !== 'client';
 const rosterIndex = (id) => session.roster.findIndex((p) => p.id === id);
@@ -245,6 +250,7 @@ let rafId = 0;
 function disposeRun() {
   if (!run) return;
   touchControls?.detach();
+  if (TOUCH) { unlockOrientation(); el.rotate.classList.add('hidden'); }
   closeBoard();
   cancelAnimationFrame(rafId);
   run.player.releaseInput();
@@ -339,6 +345,32 @@ async function startRun(difficulty, seed) {
     el.bar.style.width = `${(baker.progress * 100).toFixed(1)}%`;
     requestAnimationFrame(bakeStep);
   })();
+}
+
+/**
+ * Where player `index` of `count` starts.
+ *
+ * The old version added a flat 3.2 m to the room centre with no bounds check
+ * and no collision pass. The entrance can be small, so that pushed people
+ * straight through a wall and into whatever was on the other side — which is
+ * exactly what "the client joined but I was somewhere outside" looked like.
+ *
+ * Now the ring is sized from the room itself, the result is collision-tested,
+ * and it walks inward before it ever gives up. Everyone lands in the entrance.
+ */
+function spawnSlot(level, index, count, grid) {
+  const cx = level.spawn.x, cz = level.spawn.z;
+  const maxR = Math.max(0, Math.min(level.spawn.radius ?? 2.0, 2.6));
+  if (count <= 1 || maxR < 0.5) return { x: cx, z: cz };
+
+  const angle = (index / count) * Math.PI * 2;
+  // Try the ring, then progressively closer in, then dead centre.
+  for (const r of [maxR, maxR * 0.7, maxR * 0.45, 0]) {
+    const x = cx + Math.cos(angle) * r;
+    const z = cz + Math.sin(angle) * r;
+    if (!blocked(x, z, CONFIG.playerRadius, CONFIG.standClearance, grid)) return { x, z };
+  }
+  return { x: cx, z: cz };
 }
 
 function nearestRoom(level, x, z) {
@@ -461,7 +493,11 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
   player.onInteract = () => useNearest();
   if (TOUCH) {
     touchControls = touchControls ?? new TouchControls($('touch'));
+    touchControls.applyLayout();
     touchControls.attach(player);
+    // Landscape needs fullscreen first on every browser that supports it at
+    // all, and iOS supports neither. checkRotate() covers the failure.
+    lockLandscape().finally(checkRotate);
   }
   player.onLockChange = (locked) => {
     el.prompt.classList.toggle('hidden', TOUCH || locked || currentScreen !== null);
@@ -470,9 +506,9 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
   material.uniforms.uFlashRange.value *= loadout.stats.flashlightRange;
 
   if (isNet()) {
-    const angle = (myIndex / Math.max(1, session.roster.length)) * Math.PI * 2;
-    player.pos.x += Math.cos(angle) * 3.2;
-    player.pos.z += Math.sin(angle) * 3.2;
+    const spot = spawnSlot(level, myIndex, session.roster.length, grid);
+    player.pos.x = spot.x;
+    player.pos.z = spot.z;
   }
 
   const remotes = new Map();
@@ -1571,14 +1607,39 @@ function network(dt) {
 // ---------------------------------------------------------------------------
 
 function wireNet(net) {
+  // Every refusal happens here, before the connection is wired up, so a
+  // rejected peer never enters the roster or receives a snapshot.
+  net.gate = (conn) => {
+    if (!isHost()) return null;
+    const meta = conn.metadata ?? {};
+    if (meta.protocol !== PROTOCOL) {
+      return 'That is a different version of the game. Refresh the page and try again.';
+    }
+    if (roomLocked) return 'They have already gone in. Wait for this run to finish.';
+    if (session.roster.length >= 6) return 'That house already has six people in it.';
+    if (session.roster.some((p) => p.id === conn.peer)) return 'You are already in this room.';
+    return null;
+  };
+
   net.on('joined', ({ id, name }) => {
     if (!isHost()) return;
-    if (session.roster.length >= 6) { net.send(id, MSG.END, { full: true }, true); return; }
+    // Checked again: the gate ran when the connection opened, and the roster
+    // can have filled between then and now.
+    if (roomLocked || session.roster.length >= 6) { net.send(id, MSG.DENY, { why: 'The room closed.' }, true); return; }
     if (!session.roster.some((p) => p.id === id)) {
-      session.roster.push({ id, name, ready: false, char: DEFAULT_CHARACTER });
+      session.roster.push({ id, name: cleanName(name), ready: false, char: DEFAULT_CHARACTER });
     }
     broadcastLobby();
     voice.callAll(net.peer, [...net.conns.keys()]);
+  });
+
+  net.on(MSG.DENY, (d) => {
+    session.net?.destroy();
+    session.net = null;
+    session.mode = 'solo';
+    session.roster = [];
+    show('multiplayer');
+    showMenuError(d?.why ?? 'The host would not let you in.');
   });
 
   net.on('left', ({ id }) => {
@@ -1597,9 +1658,12 @@ function wireNet(net) {
 
   net.on(MSG.HELLO, ({ name }, from) => {
     if (!isHost()) return;
+    if (roomLocked) return;
     const entry = session.roster.find((p) => p.id === from);
-    if (entry) entry.name = name;
-    else session.roster.push({ id: from, name, ready: false, char: DEFAULT_CHARACTER });
+    if (entry) entry.name = cleanName(name);
+    else if (session.roster.length < 6) {
+      session.roster.push({ id: from, name: cleanName(name), ready: false, char: DEFAULT_CHARACTER });
+    }
     broadcastLobby();
   });
 
@@ -1793,6 +1857,15 @@ function broadcastLobby() {
 // ---------------------------------------------------------------------------
 // Screens
 // ---------------------------------------------------------------------------
+
+/** Names arrive over the wire, so they are neither trusted nor unbounded. */
+function cleanName(raw) {
+  const clean = String(raw ?? '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    .trim()
+    .slice(0, 14);
+  return clean || 'Someone';
+}
 
 function showMenuError(msg) {
   el.menuError.textContent = msg;
@@ -2153,7 +2226,9 @@ el.readyBtn.addEventListener('click', () => {
 });
 
 el.startBtn.addEventListener('click', () => {
+  if (isNet() && !isHost()) return;         // only the host may commit
   closePreview();
+  roomLocked = true;
   const seed = (Math.random() * 1e9) | 0;
   if (isNet()) {
     for (const p of session.roster) p.loaded = false;
@@ -2193,6 +2268,7 @@ voice.onStatus = () => updateMicUI();
 el.again.addEventListener('click', () => {
   const seed = (Math.random() * 1e9) | 0;
   if (isNet() && isHost()) {
+    roomLocked = true;
     for (const p of session.roster) p.loaded = false;
     session.net.broadcast(MSG.START, { difficultyId: session.difficultyId, seed }, true);
     startRun(difficultyById(session.difficultyId), seed);
@@ -2202,9 +2278,101 @@ el.again.addEventListener('click', () => {
 });
 
 el.menuBtn.addEventListener('click', () => {
-  if (isNet()) { disposeRun(); renderSelect(); return; }
+  if (isNet()) {
+    // Back in the lobby: the room takes people again.
+    if (isHost()) roomLocked = false;
+    disposeRun();
+    renderSelect();
+    return;
+  }
   buildMenu();
 });
+
+/** Nag only while actually playing, and only when the lock did not take. */
+function checkRotate() {
+  const playing = TOUCH && run && !run.over && currentScreen === null;
+  el.rotate.classList.toggle('hidden', !(playing && isPortrait()));
+}
+if (TOUCH) {
+  window.addEventListener('orientationchange', () => setTimeout(checkRotate, 250));
+  window.addEventListener('resize', () => setTimeout(checkRotate, 120));
+}
+
+// ---------------------------------------------------------------------------
+// Moving the on-screen controls
+// ---------------------------------------------------------------------------
+
+function openTouchEditor() {
+  if (!TOUCH) return;
+  touchControls = touchControls ?? new TouchControls($('touch'));
+  touchControls.applyLayout();
+  touchControls.setEditMode(true);
+  touchControls.onSelect = (id) => {
+    el.teWhich.textContent = `Resizing ${id}`;
+    $('te-size').value = String(settings.data.touch.layout[id].size);
+    $('te-size-value').textContent = `${$('te-size').value}px`;
+  };
+  $('touch').classList.remove('hidden');
+  el.touchEdit.classList.remove('hidden');
+  el.teWhich.textContent = 'Nothing selected';
+  syncTouchSliders();
+}
+
+function closeTouchEditor() {
+  touchControls?.setEditMode(false);
+  el.touchEdit.classList.add('hidden');
+  $('touch').classList.toggle('hidden', !(TOUCH && currentScreen === null));
+  settings.save();
+}
+
+function syncTouchSliders() {
+  const t = settings.data.touch;
+  $('te-scale').value = String(Math.round(t.scale * 100));
+  $('te-scale-value').textContent = `${$('te-scale').value}%`;
+  $('te-opacity').value = String(Math.round(t.opacity * 100));
+  $('te-opacity-value').textContent = `${$('te-opacity').value}%`;
+  $('te-stick').value = String(t.stickSize);
+  $('te-stick-value').textContent = `${t.stickSize}px`;
+  $('te-landscape').checked = !!t.lockLandscape;
+  const sel = touchControls?.selected;
+  $('te-size').value = String(sel ? t.layout[sel].size : 70);
+  $('te-size-value').textContent = `${$('te-size').value}px`;
+}
+
+$('te-size').addEventListener('input', (e) => {
+  const sel = touchControls?.selected;
+  if (!sel) { el.teWhich.textContent = 'Tap a button first'; return; }
+  settings.data.touch.layout[sel].size = Number(e.target.value);
+  $('te-size-value').textContent = `${e.target.value}px`;
+  touchControls.applyLayout();
+});
+$('te-scale').addEventListener('input', (e) => {
+  settings.data.touch.scale = Number(e.target.value) / 100;
+  $('te-scale-value').textContent = `${e.target.value}%`;
+  touchControls?.applyLayout();
+});
+$('te-opacity').addEventListener('input', (e) => {
+  settings.data.touch.opacity = Number(e.target.value) / 100;
+  $('te-opacity-value').textContent = `${e.target.value}%`;
+  touchControls?.applyLayout();
+});
+$('te-stick').addEventListener('input', (e) => {
+  settings.data.touch.stickSize = Number(e.target.value);
+  $('te-stick-value').textContent = `${e.target.value}px`;
+  touchControls?.applyLayout();
+});
+$('te-landscape').addEventListener('change', (e) => {
+  settings.data.touch.lockLandscape = e.target.checked;
+  settings.save();
+});
+$('te-done').addEventListener('click', closeTouchEditor);
+$('te-reset').addEventListener('click', () => {
+  settings.resetTouchLayout();
+  touchControls?.applyLayout();
+  syncTouchSliders();
+});
+$('open-touch-edit').addEventListener('click', openTouchEditor);
+$('open-touch-edit').classList.toggle('hidden', !TOUCH);
 
 // Fullscreen. Requires a user gesture, so it lives on a button rather than a
 // setting that could be applied on load.

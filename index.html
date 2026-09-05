@@ -428,16 +428,35 @@
              margin: 0; border-radius: 50%; background: rgba(207,196,180,0.20);
              border: 1px solid rgba(207,196,180,0.35);
              transform: translate(-50%, -50%); }
-  .tc-buttons { position: absolute; right: 1rem; bottom: 1.1rem;
-                display: grid; grid-template-columns: repeat(3, 4.2rem); gap: 0.5rem;
-                justify-items: center; }
-  .tc-btn { width: 4.2rem; height: 4.2rem; border-radius: 50%; padding: 0;
-            font: inherit; font-size: 0.62rem; letter-spacing: 0.06em;
-            color: var(--ink); background: rgba(10,14,20,0.42);
-            border: 1px solid rgba(207,196,180,0.28); }
-  .tc-btn.big { grid-column: span 3; width: 100%; height: 3rem; border-radius: 1.5rem;
-                font-size: 0.78rem; border-color: rgba(255,154,77,0.5); color: var(--ember); }
-  .tc-btn.on { background: rgba(255,154,77,0.28); border-color: var(--ember); }
+  /* Buttons are positioned from the saved layout, not from CSS. */
+  .tc-btn { position: absolute; border-radius: 50%; padding: 0; font: inherit;
+            letter-spacing: 0.06em; line-height: 1.1; color: var(--ink);
+            background: rgba(10,14,20,var(--tc-opacity, 0.45));
+            border: 1px solid rgba(207,196,180,0.30); }
+  .tc-btn.primary { border-color: rgba(255,154,77,0.55); color: var(--ember); }
+  .tc-btn.on { background: rgba(255,154,77,0.34); border-color: var(--ember); }
+  #touch.editing .tc-btn { border-style: dashed; border-color: rgba(159,255,200,0.6); }
+  #touch.editing .tc-btn.picked { border-style: solid; border-color: var(--exit);
+                                  box-shadow: 0 0 0 3px rgba(159,255,200,0.25); }
+  #touch.editing .tc-look, #touch.editing .tc-stickzone { pointer-events: none; }
+
+  /* ---- control customiser ---- */
+  #touch-edit { position: fixed; left: 1rem; top: 1rem; z-index: 34;
+                width: min(19rem, 46vw); display: grid; gap: 0.6rem;
+                padding: 0.9rem 1rem; background: rgba(5,7,10,0.92);
+                border: 1px solid var(--line); }
+  #touch-edit h2 { font-size: 0.92rem; }
+  #touch-edit p { color: var(--ink-dim); font-size: 0.76rem; line-height: 1.5; }
+  #touch-edit .field { gap: 0.3rem 0.8rem; }
+  #touch-edit .field label { font-size: 0.8rem; }
+  #te-which { color: var(--exit); font-size: 0.8rem; min-height: 1.1em; }
+  #te-buttons { display: flex; gap: 0.5rem; }
+
+  /* ---- turn the phone ---- */
+  #rotate { position: fixed; inset: 0; z-index: 45; background: var(--void);
+            display: grid; place-content: center; justify-items: center; gap: 1rem;
+            text-align: center; padding: 2rem; }
+  #rotate-icon { font-size: 3rem; color: var(--ember); }
 
   /* On a phone the HUD has to give the controls room, and the menus have to
      stop assuming a mouse-sized hit area. */
@@ -495,6 +514,38 @@
   </div>
 </div>
 <div id="touch" class="hidden"></div>
+
+<div id="touch-edit" class="hidden">
+  <h2>Move the controls</h2>
+  <p>Drag any button where you want it. Tap one to resize just that button.</p>
+  <div id="te-which">Nothing selected</div>
+  <div class="field">
+    <label for="te-size">This button</label><output id="te-size-value"></output>
+    <input type="range" id="te-size" min="40" max="150">
+  </div>
+  <div class="field">
+    <label for="te-scale">Everything</label><output id="te-scale-value"></output>
+    <input type="range" id="te-scale" min="60" max="180">
+  </div>
+  <div class="field">
+    <label for="te-opacity">See-through</label><output id="te-opacity-value"></output>
+    <input type="range" id="te-opacity" min="10" max="90">
+  </div>
+  <div class="field">
+    <label for="te-stick">Stick size</label><output id="te-stick-value"></output>
+    <input type="range" id="te-stick" min="90" max="200">
+  </div>
+  <label class="check"><input type="checkbox" id="te-landscape">Force landscape in game</label>
+  <div id="te-buttons">
+    <button class="btn primary" id="te-done">Done</button>
+    <button class="btn quiet" id="te-reset">Reset</button>
+  </div>
+</div>
+
+<div id="rotate" class="hidden">
+  <div id="rotate-icon">&#8635;</div>
+  <p class="fine">Turn your phone sideways.<br>The house does not fit upright.</p>
+</div>
 <div id="roster-hud" class="hidden"></div>
 <div id="hud-timer" class="hidden">0:00</div>
 <button class="btn quiet hidden" id="fullscreen" title="Fullscreen">&#9974;</button>
@@ -713,6 +764,7 @@
       <input type="range" id="sensitivity" min="4" max="60">
     </div>
     <label class="check"><input type="checkbox" id="invert-y">Invert vertical look</label>
+    <button class="btn quiet hidden" id="open-touch-edit">Move the on-screen controls</button>
     <button class="btn quiet" id="reset-binds">Reset keys to defaults</button>
   </div>
 

@@ -29,6 +29,7 @@ export const MSG = {
   RELIC: 'rl',         // terminal started, solved, relic taken, relic placed
   BOARD: 'bd',         // a chalk stroke, or a wipe
   VOTE: 'vt',          // everyone is down: the group revive vote
+  DENY: 'no',          // host refusing a join, with a reason
   START: 'start',      // host -> all: difficulty + seed, go build the maze
   LOADED: 'loaded',    // client -> host: my bake finished
   BEGIN: 'begin',      // host -> all: everyone is ready, unpause
@@ -40,6 +41,13 @@ export const MSG = {
   REVIVE: 'rv',        // client -> host: I finished reviving X / host -> all: confirmed
   END: 'end',          // host -> all: run over
 };
+
+/**
+ * Bumped whenever the wire format changes. A player on a stale cached build
+ * otherwise joins successfully and then behaves inexplicably, which is far
+ * harder to diagnose than being told to refresh.
+ */
+export const PROTOCOL = 3;
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1
 const PREFIX = 'darkhouse-v1-';
@@ -60,6 +68,8 @@ export class Net {
     this.conns = new Map();      // peerId -> { rel, unrel, name, ready }
     this.handlers = new Map();
     this.open = false;
+    /** Host-side: return a reason string to refuse a connection, or null. */
+    this.gate = null;
   }
 
   on(type, fn) {
@@ -107,7 +117,7 @@ export class Net {
         this.id = id;
         const rel = this.peer.connect(this.hostId, {
           reliable: true, serialization: 'json',
-          metadata: { role: 'rel', name },
+          metadata: { role: 'rel', name, protocol: PROTOCOL },
         });
         const unrel = this.peer.connect(this.hostId, {
           reliable: false, serialization: 'json',
@@ -138,6 +148,19 @@ export class Net {
 
   _acceptConnection(conn) {
     const role = conn.metadata?.role ?? 'rel';
+    // Refuse before wiring anything up, so a rejected peer never lands in the
+    // roster or receives a snapshot.
+    if (role === 'rel' && this.gate) {
+      const why = this.gate(conn);
+      if (why) {
+        conn.on('open', () => {
+          conn.send({ t: 'no', d: { why } });
+          setTimeout(() => conn.close(), 400);
+        });
+        return;
+      }
+    }
+
     let entry = this.conns.get(conn.peer);
     if (!entry) {
       entry = { rel: null, unrel: null, name: conn.metadata?.name ?? 'Someone', ready: false };

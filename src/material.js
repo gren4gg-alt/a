@@ -212,7 +212,7 @@ export function createHouseMaterial(surfaces, anisotropy = 4) {
       uFlashInner:  { value: Math.cos(THREE.MathUtils.degToRad(14)) },
       uFlashOuter:  { value: Math.cos(THREE.MathUtils.degToRad(34)) },
       uFlashRange:  { value: 22.0 },
-      uFlashGain:   { value: 1.9 },
+      uFlashGain:   { value: 1.4 },
       uFlashOn:     { value: 1.0 },
       uFlashFlicker:{ value: 1.0 },
 

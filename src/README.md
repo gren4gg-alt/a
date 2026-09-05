@@ -23,12 +23,30 @@ Touch is detected from `(pointer: coarse)` and changes four things:
 - **Pixel ratio is capped at 1.0** regardless of preset. Phones report a device
   ratio of 3 or 4; honouring that renders nine to sixteen times the pixels of
   the CSS size for no visible gain and a great deal of heat.
-- **A virtual stick, a look zone and six buttons.** The stick re-centres under
-  your thumb wherever it lands, has a 14% dead zone, and stays analogue — easing
-  it over gives a slow quiet walk, which matters when the thing hunting you goes
-  by noise.
+- **A virtual stick, a look zone and six buttons**, laid out as a right-thumb
+  arc with the one you press most in the middle of it. The stick re-centres
+  under your thumb wherever it lands, has a 14% dead zone, and stays analogue —
+  easing it over gives a slow quiet walk, which matters when the thing hunting
+  you goes by noise.
 - **No pointer lock and no click-to-look prompt**, since there is nothing to
   capture.
+- **Landscape is requested on entering a house** and released on leaving. Every
+  browser that can lock orientation requires fullscreen first, and iOS Safari
+  cannot lock at all, so a failure falls back to a "turn your phone" screen
+  rather than pretending it worked. Switchable off in the customiser.
+
+### Moving the controls
+
+Settings → Controls → *Move the on-screen controls*. Drag any button anywhere;
+tap one to resize just it; sliders for overall scale, transparency and stick
+size; Reset puts it all back.
+
+Positions are stored as **fractions of the viewport**, not pixels, so a layout
+survives a rotation or a move to a different phone. Buttons are clamped so the
+whole button stays on screen however far you drag, and a non-finite position is
+refused outright — writing a `NaN` into saved settings would make that button
+vanish on every future run, which is a bug you would never connect back to
+having dragged something.
 
 Everything is pointer-event based with explicit `pointerId` tracking, because
 the stick, the look drag and a button press all happen at once. Verified:
@@ -532,6 +550,26 @@ player simulates their own walking locally and reports position. Full server
 reconciliation is the right answer for a competitive game; here it buys a lot of
 complexity to defend against someone who can only grief their own friends, and
 local movement feels perfect this way.
+
+**The room locks when the host goes in.** Everyone spawns together in the
+entrance, nobody can join a run in progress, and only the host can commit. Joins
+are refused *before* the connection is wired up, so a rejected peer never enters
+the roster or receives a snapshot, and it is told why — full, already started,
+already joined, or a protocol mismatch.
+
+That last one matters more than it sounds: `PROTOCOL` in `net.js` is bumped
+whenever the wire format changes, because a player on a stale cached build
+otherwise joins successfully and then behaves inexplicably, which is far harder
+to diagnose than being told to refresh. Names arriving over the wire are
+stripped of control characters and capped at 14 characters.
+
+**Everyone spawns in the same room.** The entrance plot is forced to the `large`
+category, because six people cannot spawn in a 3.5 × 3.0 m closet, and spawn
+positions sit on a ring sized from that room and then collision-tested, walking
+inward before ever giving up. Measured over 192 spawns across 32 houses: 0
+outside the entrance, 0 inside geometry, and 0 of 12 test parties split across
+rooms. The old code added a flat 3.2 m to the room centre with neither a bounds
+check nor a collision pass, which is what put a joining player outside the room.
 
 **Two data connections per peer.** PeerJS sets reliability per connection, not
 per message. Mixing 15 Hz position spam with door-unlock events on one ordered
