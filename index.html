@@ -250,7 +250,7 @@
   #revive-track { width: 9rem; height: 2px; background: rgba(232,185,168,0.2); }
   #revive-bar { height: 100%; width: 0; background: var(--blood); }
 
-  #downed { position: fixed; inset: 0; z-index: 15; display: grid; place-content: center;
+  #downed { position: fixed; inset: 0; z-index: 22; display: grid; place-content: center;
             justify-items: center; gap: 0.5rem; text-align: center; pointer-events: none;
             background: rgba(40,4,2,0.35); }
   #downed strong { font-size: 1.45rem; font-weight: 300; letter-spacing: 0.22em; color: var(--blood); }
@@ -318,12 +318,23 @@
   .mg-block.picked { outline: 2px solid #8fd6ff; outline-offset: 2px; }
   .mg-divider { width: 100%; height: 1px; background: rgba(143,214,255,0.14); }
 
-  #fullscreen, #fullscreen-menu { position: fixed; right: 1.4rem; top: 1.2rem; z-index: 32;
+  #fullscreen, #fullscreen-menu, #ingame-menu { position: fixed; right: 1.4rem; top: 1.2rem; z-index: 32;
     width: 2.1rem; height: 2.1rem; display: grid; place-content: center; padding: 0;
     border-radius: 50%; font-size: 0.9rem; line-height: 1; }
   /* In game it must accept a click without the canvas stealing it for pointer lock. */
   #fullscreen { pointer-events: auto; opacity: 0.45; }
   #fullscreen:hover { opacity: 1; }
+  /* Settings, in game, always reachable. On a phone there is no Escape key and
+     no click-to-look prompt, so this used to be the one screen you could not
+     get to once a run had started. Sits left of the fullscreen button. */
+  #ingame-menu { right: 4.1rem; pointer-events: auto; opacity: 0.45; font-size: 1.05rem; }
+  #ingame-menu:hover { opacity: 1; }
+  @media (pointer: coarse) {
+    /* A 2.1rem circle is under the 44px tap target every phone guideline asks
+       for, and this one has to be hittable with a thumb mid-run. */
+    #fullscreen, #ingame-menu { width: 2.9rem; height: 2.9rem; opacity: 0.7; }
+    #ingame-menu { right: 5.0rem; }
+  }
   #fullscreen-settings { width: auto; height: auto; position: static; border-radius: 0;
     display: inline-block; padding: 0.55rem 1.1rem; font-size: inherit; }
 
@@ -629,6 +640,7 @@
 <div id="roster-hud" class="hidden"></div>
 <div id="hud-timer" class="hidden">0:00</div>
 <button class="btn quiet hidden" id="fullscreen" title="Fullscreen">&#9974;</button>
+<button class="btn quiet hidden" id="ingame-menu" title="Settings" aria-label="Settings">&#9881;</button>
 <div id="power" class="hidden">
   <div id="power-line"><span id="power-name">Flare</span> · <span id="power-key">Q</span></div>
   <div id="power-track"><div id="power-fill"></div></div>

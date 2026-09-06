@@ -73,6 +73,29 @@ function fit(object, targetHeight) {
 const cache = new Map();
 
 /**
+ * Mark a clone as belonging to the shared cache.
+ *
+ * Object3D.clone() copies the transform tree but SHARES geometry and materials
+ * with the original. A scene teardown that walks every mesh and calls
+ * geometry.dispose() therefore frees the parsed GLB itself, and the next run
+ * clones something that no longer has buffers on the GPU — which is why the
+ * furniture came back wrong on the second house and not the first. Anything
+ * carrying this flag is skipped by that teardown.
+ */
+function pool(copy) {
+  copy.userData.pooled = true;
+  return copy;
+}
+
+/** Is this object, or anything above it, a clone of a cached model? */
+export function isPooled(object) {
+  for (let o = object; o; o = o.parent) {
+    if (o.userData?.pooled) return true;
+  }
+  return false;
+}
+
+/**
  * @returns {THREE.Object3D|null} a fresh clone, or null if the slot has no
  *   model and the caller should build its primitive instead.
  */
@@ -81,7 +104,7 @@ export function instance(slot) {
   if (!entry) return null;
   const copy = entry.root.clone(true);
   copy.animations = entry.animations;
-  return copy;
+  return pool(copy);
 }
 
 /** Post-fit dimensions in metres, or null if the slot has no model. */
@@ -116,7 +139,7 @@ export function instanceScaled(slot, height) {
   if (!entry) return null;
   const copy = entry.root.clone(true);
   if (entry.size.y > 1e-4 && height) copy.scale.setScalar(height / entry.size.y);
-  return copy;
+  return pool(copy);
 }
 
 /**
@@ -167,7 +190,7 @@ export function instanceInBox(slot, w, h, d) {
   const k = Math.min(w / s.x, h / s.y, d / s.z);
   const copy = entry.root.clone(true);
   copy.scale.setScalar(k);
-  return { object: copy, w: s.x * k, h: s.y * k, d: s.z * k };
+  return { object: pool(copy), w: s.x * k, h: s.y * k, d: s.z * k };
 }
 
 export function animationsFor(slot) { return cache.get(slot)?.animations ?? []; }

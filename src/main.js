@@ -9,14 +9,14 @@ import {
   wallGeometry, floorGeometry, ceilingGeometry, propGeometry, propColliders,
 } from './build.js';
 import { createBaker } from './bake.js';
-import { createHouseMaterial, createGlowMaterial, flickerSignal } from './material.js';
+import { createHouseMaterial, createGlowMaterial, flickerSignal, PropMaterials } from './material.js';
 import { Player, ColliderGrid, blocked } from './player.js';
 import { Visibility } from './rooms.js';
 import { Ghost } from './enemy.js';
 import { loadSurfaceTextures } from './textures.js';
 import { loadModels } from './models.js';
 import { Interactables } from './interact.js';
-import { instance as modelInstance, fitInfo, has as hasModel } from './models.js';
+import { instance as modelInstance, fitInfo, has as hasModel, isPooled } from './models.js';
 import { startMinigame, GAME_NAMES } from './minigames.js';
 import { ceilingColliders, roomVariant } from './build.js';
 import { MenuScene } from './menuscene.js';
@@ -57,6 +57,7 @@ const el = {
   power: $('power'), powerName: $('power-name'), powerKey: $('power-key'), powerFill: $('power-fill'),
   talk: $('talk-indicator'),
   prompt: $('prompt'), promptKeys: $('prompt-keys'), vignette: $('vignette'),
+  ingameMenu: $('ingame-menu'),
   use: $('use'), useLabel: $('use-label'), useKey: $('use-key'),
   hiding: $('hiding'), hidingKey: $('hiding-key'),
   door: $('door-status'), doorCount: $('door-count'),
@@ -92,13 +93,34 @@ function show(name) {
   // These three were only ever toggled by gameplay, so they sat on top of the
   // main menu: the click-to-look prompt, the door counter and the carry line.
   el.door.classList.toggle('hidden', !inGame);
-  // There is nothing to capture on a touch device, and the prompt would just
-  // sit there telling you to click.
-  el.prompt.classList.toggle('hidden', TOUCH || !inGame || !!document.pointerLockElement);
+  syncPrompt();
   $('touch').classList.toggle('hidden', !TOUCH || !inGame);
   if (TOUCH && !inGame) el.rotate.classList.add('hidden');
   if (!inGame) el.carrying.classList.add('hidden');
   $('fullscreen').classList.toggle('hidden', !inGame);
+  el.ingameMenu.classList.toggle('hidden', !inGame);
+}
+
+/**
+ * Whether the click-to-look prompt belongs on screen.
+ *
+ * It used to be toggled from two places with two different conditions, neither
+ * of which knew about the other overlays. Release the mouse while you are on
+ * the floor and you got the prompt drawn straight over the knocked-out panel:
+ * two headings, two sets of body text and the ad button underneath both of
+ * them. One function, asked at every point the answer can change.
+ *
+ * Nothing to capture on a touch device, so it never shows there at all.
+ */
+function syncPrompt() {
+  const inGame = currentScreen === null;
+  const locked = !!document.pointerLockElement;
+  // Any overlay that owns the middle of the screen and has something to press.
+  const occupied = !el.downed.classList.contains('hidden')
+                || !el.vote.classList.contains('hidden')
+                || !el.tv.classList.contains('hidden')
+                || !el.board.classList.contains('hidden');
+  el.prompt.classList.toggle('hidden', TOUCH || !inGame || locked || occupied);
 }
 
 // Screens that sit over the diorama rather than blacking it out.
@@ -326,12 +348,17 @@ function disposeRun() {
   run.player.releaseInput();
   for (const r of run.remotes.values()) r.dispose(run.scene);
   run.scene.traverse((o) => {
-    if (o.isMesh || o.isLineSegments) {
-      o.geometry?.dispose();
-      if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
-      else o.material?.dispose();
-    }
+    if (!o.isMesh && !o.isLineSegments) return;
+    // Clones of a cached model share their geometry with the cache. Disposing
+    // it here freed the parsed GLB for every future run, so the second house
+    // came up with the furniture missing or garbled. The materials on those
+    // clones are ours and go with run.propMats below.
+    if (isPooled(o)) return;
+    o.geometry?.dispose();
+    if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
+    else o.material?.dispose();
   });
+  run.propMats?.dispose();
   run = null;
 }
 
@@ -475,6 +502,12 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     roomMeshes.set(roomId, group);
   }
 
+  // Everything imported gets relit. A GLB brings a MeshStandardMaterial with
+  // it, and there is not one light in this scene — the house is lit by a baked
+  // vertex attribute and a shader torch — so an untouched import renders as a
+  // black silhouette. See PropMaterials in material.js.
+  const propMats = new PropMaterials(material);
+
   let modelled = 0;
   for (const p of level.props) {
     if (!hasModel(p.kind)) continue;
@@ -483,6 +516,7 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     if (p.fitScale) obj.scale.setScalar(p.fitScale);
     obj.position.set(p.x, p.y ?? 0, p.z);
     obj.rotation.y = p.facing;
+    propMats.apply(obj);
     roomMeshes.get(p.room)?.add(obj);
     modelled++;
   }
@@ -582,9 +616,7 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     // all, and iOS supports neither. checkRotate() covers the failure.
     lockLandscape().finally(checkRotate);
   }
-  player.onLockChange = (locked) => {
-    el.prompt.classList.toggle('hidden', TOUCH || locked || currentScreen !== null);
-  };
+  player.onLockChange = () => syncPrompt();
 
   material.uniforms.uFlashRange.value *= loadout.stats.flashlightRange;
 
@@ -599,6 +631,10 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
   for (const p of session.roster) {
     if (p.id === session.localId) continue;
     const r = new RemotePlayer(scene, p.id, p.name, rosterIndex(p.id), !isHost(), p.char);
+    // Same reason as the furniture: a teammate wearing a supplied model was a
+    // person-shaped hole in the dark. The capsule fallback is already self-lit,
+    // so only the modelled ones need this.
+    if (r.usesModel) propMats.apply(r.mesh);
     const lo = new Loadout(characterById(p.char ?? DEFAULT_CHARACTER));
     r.loudness = lo.stats.loudnessScale;
     r.knifeDodge = lo.stats.knifeDodge;
@@ -635,7 +671,7 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
   vis.update(player.pos.x, player.pos.z);
 
   run = {
-    difficulty, level, scene, material, player, remotes, ghosts, vis, grid,
+    difficulty, level, scene, material, propMats, player, remotes, ghosts, vis, grid,
     loadout, loadouts, interact, lootItems, lootMat, beadMat, exitMat, exitRoom, pillar,
     carrying: null, minigame: null, busyTerminals: new Map(), useTarget: null,
     sheltered: null,
@@ -1131,6 +1167,7 @@ function applyDownLocal() {
   if (run.boardOpen) closeBoard();
   audio.hit();
   el.downed.classList.remove('hidden');
+  syncPrompt();
   el.downedTimer.textContent = String(Math.ceil(
     run.downTimers.get(session.localId) ?? CONFIG.bleedOutSeconds,
   ));
@@ -1157,6 +1194,7 @@ function applyDeadLocal() {
 function applyReviveLocal() {
   run.player.downed = false;
   el.downed.classList.add('hidden');
+  syncPrompt();
 }
 
 // ---------------------------------------------------------------------------
@@ -1373,6 +1411,12 @@ function step(now) {
   const dt = Math.min((now - lastFrame) / 1000, 0.1);
   lastFrame = now;
   run.time += dt;
+
+  // Four classList reads a frame, and in exchange the click-to-look prompt can
+  // never again be left showing on top of an overlay that opened without
+  // remembering to tell it. Every overlay in the game opens from somewhere
+  // different; this is the one place that sees all of them.
+  syncPrompt();
 
   if (!run.over && run.begun) {
     accumulator += dt;
@@ -2476,6 +2520,16 @@ $('settings-back').addEventListener('click', () => {
 $('ingame-settings').addEventListener('click', (e) => {
   e.stopPropagation();
   settingsUI.openTab('controls');
+  show('settings');
+});
+// The same door, but always on screen. The prompt one only exists on desktop
+// and only while the mouse is free, so on a phone — no Escape key, no prompt —
+// settings were unreachable from the moment a run started, which also meant
+// the on-screen controls could not be moved without quitting to the menu.
+el.ingameMenu.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (!run || run.over) return;
+  settingsUI.openTab(TOUCH ? 'controls' : 'graphics');
   show('settings');
 });
 $('about-back').addEventListener('click', () => buildMenu());

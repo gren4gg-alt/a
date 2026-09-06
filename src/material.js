@@ -355,3 +355,183 @@ export function createGlowMaterial(hex, opts = {}) {
     `,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Supplied models: furniture, characters, anything that arrives as a .glb.
+//
+// This is the fix for "every model is a black cube".
+//
+// There is not a single THREE.Light in the house. All steady lighting lives in
+// the aLit vertex attribute the baker writes, and the torch is a hand-rolled
+// cone in the shader above. A GLB arrives carrying MeshStandardMaterial, which
+// is a physically based material and therefore needs lights to reflect — put
+// one in a scene with no lights and it renders exactly what it is told to
+// render, which is black. Nothing was wrong with the models; they were being
+// asked to reflect light that does not exist.
+//
+// So every material on an imported model is swapped for one built here: the
+// model's own base colour and texture, lit by the same torch, the same flare
+// and the same fog as the walls around it. MeshBasicMaterial rather than a raw
+// ShaderMaterial on purpose — three's own vertex pipeline comes with it, so
+// skinned characters, morph targets and vertex colours all keep working, and
+// the lighting is injected with onBeforeCompile rather than reimplemented.
+// ---------------------------------------------------------------------------
+
+const PROP_UNIFORMS = [
+  'uFlashPos', 'uFlashDir', 'uFlashColor', 'uFlashInner', 'uFlashOuter',
+  'uFlashRange', 'uFlashGain', 'uFlashOn', 'uFlashFlicker',
+  'uFlarePos', 'uFlareColor', 'uFlareRange', 'uFlareOn',
+  'uFogColor', 'uFogDensity',
+];
+
+const PROP_DECL = /* glsl */`
+uniform vec3  uFlashPos;
+uniform vec3  uFlashDir;
+uniform vec3  uFlashColor;
+uniform float uFlashInner;
+uniform float uFlashOuter;
+uniform float uFlashRange;
+uniform float uFlashGain;
+uniform float uFlashOn;
+uniform float uFlashFlicker;
+uniform vec3  uFlarePos;
+uniform vec3  uFlareColor;
+uniform float uFlareRange;
+uniform float uFlareOn;
+uniform vec3  uFogColor;
+uniform float uFogDensity;
+uniform float uAmbient;
+varying vec3 vPropWorld;
+varying vec3 vPropNormal;
+`;
+
+/**
+ * One material per distinct source material, per run.
+ *
+ * Per run matters: models are parsed once and cloned, and a three.js clone
+ * SHARES its material and geometry with the original. Disposing a run's scene
+ * therefore used to reach back into the model cache and free the very things
+ * the next run was going to clone, so the second house came up wrong. The
+ * materials here belong to the run and are disposed with it; the cached
+ * geometry is left alone (see the pooled flag in models.js).
+ */
+export class PropMaterials {
+  constructor(house) {
+    this.house = house;
+    this.cache = new Map();
+  }
+
+  /** Swap every material in a subtree. Returns the object, for chaining. */
+  apply(root) {
+    if (!root) return root;
+    root.traverse((o) => {
+      if (!o.isMesh && !o.isSkinnedMesh && !o.isPoints && !o.isLine) return;
+      o.material = Array.isArray(o.material)
+        ? o.material.map((m) => this._for(m))
+        : this._for(o.material);
+    });
+    return root;
+  }
+
+  _for(source) {
+    if (!source || source.isShaderMaterial) return source;
+    const key = `${source.uuid}`;
+    const hit = this.cache.get(key);
+    if (hit) return hit;
+    const made = this._build(source);
+    this.cache.set(key, made);
+    return made;
+  }
+
+  _build(source) {
+    const m = new THREE.MeshBasicMaterial({
+      map: source.map ?? null,
+      color: source.color ? source.color.clone() : new THREE.Color(0xffffff),
+      // Cut-out foliage, glass, decals: whatever the exporter asked for.
+      transparent: !!source.transparent,
+      opacity: source.opacity ?? 1,
+      alphaTest: source.alphaTest ?? 0,
+      alphaMap: source.alphaMap ?? null,
+      side: source.side ?? THREE.FrontSide,
+      vertexColors: !!source.vertexColors,
+      depthWrite: source.depthWrite !== false,
+      // Our own fog, matched to the house's, is applied below. Three's would
+      // be a second one on top of it.
+      fog: false,
+    });
+    m.name = `prop:${source.name || 'unnamed'}`;
+
+    const u = this.house.uniforms;
+    // 0.16 is a floor, not a light: enough that a chair in an unlit corner
+    // reads as a shape rather than a hole, dim enough that the torch is still
+    // the reason you can see anything.
+    const ambient = { value: 0.16 };
+
+    m.onBeforeCompile = (shader) => {
+      // SHARED BY REFERENCE. main.js writes the torch position onto the house
+      // material once a frame; sharing the uniform objects means these follow
+      // it with nobody having to remember they exist.
+      for (const name of PROP_UNIFORMS) shader.uniforms[name] = u[name];
+      shader.uniforms.uAmbient = ambient;
+
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `#include <common>\n${PROP_DECL}`)
+        .replace('#include <project_vertex>', /* glsl */`
+          #include <project_vertex>
+          vec4 propWorld = modelMatrix * vec4(transformed, 1.0);
+          vPropWorld  = propWorld.xyz;
+          vPropNormal = normalize(mat3(modelMatrix) * normal);
+        `);
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>\n${PROP_DECL}`)
+        .replace('#include <tonemapping_fragment>', /* glsl */`
+          {
+            vec3 n = normalize(vPropNormal);
+            vec3 lightSum = vec3(uAmbient);
+
+            if (uFlashOn > 0.5) {
+              vec3  toFrag = vPropWorld - uFlashPos;
+              float d = length(toFrag);
+              vec3  L = toFrag / max(d, 1e-4);
+              float axis  = dot(L, uFlashDir);
+              float cone  = smoothstep(uFlashOuter, uFlashInner, axis);
+              float spill = smoothstep(uFlashOuter - 0.22, uFlashOuter, axis) * 0.22;
+              float att   = clamp(1.0 - d / uFlashRange, 0.0, 1.0);
+              att *= att;
+              // Half lambert. A model's normals are not the tidy axis-aligned
+              // ones the house is built from, and a hard dot leaves the far
+              // side of a chair as a black cut-out even under a full beam.
+              float ndl = mix(0.45, max(dot(n, -L), 0.0), 0.55);
+              lightSum += uFlashColor * ((cone + spill) * att * ndl * uFlashGain * uFlashFlicker);
+            }
+
+            if (uFlareOn > 0.5) {
+              vec3  toFlare = uFlarePos - vPropWorld;
+              float fd = length(toFlare);
+              vec3  FL = toFlare / max(fd, 1e-4);
+              float fatt = clamp(1.0 - fd / uFlareRange, 0.0, 1.0);
+              fatt *= fatt;
+              float fndl = mix(0.45, max(dot(n, FL), 0.0), 0.55);
+              lightSum += uFlareColor * (fatt * fndl * uFlareOn);
+            }
+
+            gl_FragColor.rgb *= lightSum;
+
+            float propDist = length(vPropWorld - cameraPosition);
+            float propFog  = 1.0 - exp(-uFogDensity * uFogDensity * propDist * propDist);
+            gl_FragColor.rgb = mix(gl_FragColor.rgb, uFogColor, clamp(propFog, 0.0, 1.0));
+          }
+          #include <tonemapping_fragment>
+        `);
+    };
+    // Two materials with identical injected code can share a compiled program.
+    m.customProgramCacheKey = () => 'prop-lit-v1';
+    return m;
+  }
+
+  dispose() {
+    for (const m of this.cache.values()) m.dispose();
+    this.cache.clear();
+  }
+}

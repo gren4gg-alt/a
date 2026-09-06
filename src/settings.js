@@ -43,15 +43,30 @@ export const QUALITY = {
  * can reach the corners of.
  */
 export const TOUCH_DEFAULTS = {
-  interact:   { x: 0.855, y: 0.720, size: 84 },
-  power:      { x: 0.740, y: 0.520, size: 64 },
-  sprint:     { x: 0.955, y: 0.480, size: 62 },
-  crouch:     { x: 0.955, y: 0.815, size: 62 },
-  flashlight: { x: 0.705, y: 0.880, size: 58 },
+  interact:   { x: 0.870, y: 0.720, size: 84 },
+  power:      { x: 0.745, y: 0.500, size: 64 },
+  // RUN lives on the LEFT, just above and right of the walking stick, the way
+  // every mobile shooter places it. It is a hold, and you hold it with the
+  // same thumb that is already steering — putting it under the right thumb
+  // meant letting go of aim to start sprinting.
+  sprint:     { x: 0.300, y: 0.315, size: 68 },
+  crouch:     { x: 0.955, y: 0.790, size: 62 },
+  flashlight: { x: 0.720, y: 0.855, size: 58 },
   // Kept clear of the top-right corner: the timer and the door counter live
   // there and the button was landing on top of both.
   talk:       { x: 0.560, y: 0.115, size: 52 },
 };
+
+/**
+ * Bumped whenever the default placement above changes.
+ *
+ * A saved layout is merged over the defaults, so anyone who has played before
+ * keeps their old positions forever — including the ones we just decided were
+ * wrong. This resets the placement once, and only the placement: binds, name,
+ * audio and graphics are untouched. Someone who has deliberately dragged their
+ * own buttons around loses that one arrangement, which is the trade.
+ */
+export const TOUCH_LAYOUT_VERSION = 2;
 
 /** Order here is the order they appear in the controls screen. */
 export const BINDABLE = [
@@ -93,6 +108,9 @@ const DEFAULTS = () => ({
   binds: Object.fromEntries(BINDABLE.map((b) => [b.id, b.def])),
   touch: {
     layout: JSON.parse(JSON.stringify(TOUCH_DEFAULTS)),
+    // 1, not TOUCH_LAYOUT_VERSION: a save from before this key existed leaves
+    // the default in place, and the mismatch is exactly the signal we want.
+    layoutVersion: 1,
     scale: 1.0,
     opacity: 0.45,
     stickSize: 132,
@@ -125,6 +143,11 @@ class SettingsStore {
       // missing a key still boots with a sane value for it.
       if (raw) deepMerge(this.data, JSON.parse(raw));
     } catch { /* defaults */ }
+    if (this.data.touch.layoutVersion !== TOUCH_LAYOUT_VERSION) {
+      this.data.touch.layout = JSON.parse(JSON.stringify(TOUCH_DEFAULTS));
+      this.data.touch.layoutVersion = TOUCH_LAYOUT_VERSION;
+      this.save();
+    }
   }
 
   save() {
@@ -136,11 +159,13 @@ class SettingsStore {
 
   reset() {
     this.data = DEFAULTS();
+    this.data.touch.layoutVersion = TOUCH_LAYOUT_VERSION;
     this.save();
   }
 
   resetTouchLayout() {
     this.data.touch.layout = JSON.parse(JSON.stringify(TOUCH_DEFAULTS));
+    this.data.touch.layoutVersion = TOUCH_LAYOUT_VERSION;
     this.data.touch.scale = 1.0;
     this.data.touch.opacity = 0.45;
     this.data.touch.stickSize = 132;

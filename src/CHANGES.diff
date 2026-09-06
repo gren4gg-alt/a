@@ -1,0 +1,556 @@
+# Patch: black models, the Alt-while-downed overlap, in-game settings, RUN on the left
+#
+# Apply with:  git apply CHANGES.diff   (from the repo root)
+# Paths below are relative to the copies in /mnt/project; adjust the a/ b/
+# prefixes to src/ if git complains about paths.
+
+--- /mnt/project/index.html	1979-12-31 00:00:00.000000000 +0000
++++ work/index.html	2026-09-06 02:34:12.557775017 +0000
+@@ -250,7 +250,7 @@
+   #revive-track { width: 9rem; height: 2px; background: rgba(232,185,168,0.2); }
+   #revive-bar { height: 100%; width: 0; background: var(--blood); }
+ 
+-  #downed { position: fixed; inset: 0; z-index: 15; display: grid; place-content: center;
++  #downed { position: fixed; inset: 0; z-index: 22; display: grid; place-content: center;
+             justify-items: center; gap: 0.5rem; text-align: center; pointer-events: none;
+             background: rgba(40,4,2,0.35); }
+   #downed strong { font-size: 1.45rem; font-weight: 300; letter-spacing: 0.22em; color: var(--blood); }
+@@ -318,12 +318,23 @@
+   .mg-block.picked { outline: 2px solid #8fd6ff; outline-offset: 2px; }
+   .mg-divider { width: 100%; height: 1px; background: rgba(143,214,255,0.14); }
+ 
+-  #fullscreen, #fullscreen-menu { position: fixed; right: 1.4rem; top: 1.2rem; z-index: 32;
++  #fullscreen, #fullscreen-menu, #ingame-menu { position: fixed; right: 1.4rem; top: 1.2rem; z-index: 32;
+     width: 2.1rem; height: 2.1rem; display: grid; place-content: center; padding: 0;
+     border-radius: 50%; font-size: 0.9rem; line-height: 1; }
+   /* In game it must accept a click without the canvas stealing it for pointer lock. */
+   #fullscreen { pointer-events: auto; opacity: 0.45; }
+   #fullscreen:hover { opacity: 1; }
++  /* Settings, in game, always reachable. On a phone there is no Escape key and
++     no click-to-look prompt, so this used to be the one screen you could not
++     get to once a run had started. Sits left of the fullscreen button. */
++  #ingame-menu { right: 4.1rem; pointer-events: auto; opacity: 0.45; font-size: 1.05rem; }
++  #ingame-menu:hover { opacity: 1; }
++  @media (pointer: coarse) {
++    /* A 2.1rem circle is under the 44px tap target every phone guideline asks
++       for, and this one has to be hittable with a thumb mid-run. */
++    #fullscreen, #ingame-menu { width: 2.9rem; height: 2.9rem; opacity: 0.7; }
++    #ingame-menu { right: 5.0rem; }
++  }
+   #fullscreen-settings { width: auto; height: auto; position: static; border-radius: 0;
+     display: inline-block; padding: 0.55rem 1.1rem; font-size: inherit; }
+ 
+@@ -629,6 +640,7 @@
+ <div id="roster-hud" class="hidden"></div>
+ <div id="hud-timer" class="hidden">0:00</div>
+ <button class="btn quiet hidden" id="fullscreen" title="Fullscreen">&#9974;</button>
++<button class="btn quiet hidden" id="ingame-menu" title="Settings" aria-label="Settings">&#9881;</button>
+ <div id="power" class="hidden">
+   <div id="power-line"><span id="power-name">Flare</span> · <span id="power-key">Q</span></div>
+   <div id="power-track"><div id="power-fill"></div></div>
+--- /mnt/project/main.js	1979-12-31 00:00:00.000000000 +0000
++++ work/main.js	2026-09-06 02:36:50.003184457 +0000
+@@ -9,14 +9,14 @@
+   wallGeometry, floorGeometry, ceilingGeometry, propGeometry, propColliders,
+ } from './build.js';
+ import { createBaker } from './bake.js';
+-import { createHouseMaterial, createGlowMaterial, flickerSignal } from './material.js';
++import { createHouseMaterial, createGlowMaterial, flickerSignal, PropMaterials } from './material.js';
+ import { Player, ColliderGrid, blocked } from './player.js';
+ import { Visibility } from './rooms.js';
+ import { Ghost } from './enemy.js';
+ import { loadSurfaceTextures } from './textures.js';
+ import { loadModels } from './models.js';
+ import { Interactables } from './interact.js';
+-import { instance as modelInstance, fitInfo, has as hasModel } from './models.js';
++import { instance as modelInstance, fitInfo, has as hasModel, isPooled } from './models.js';
+ import { startMinigame, GAME_NAMES } from './minigames.js';
+ import { ceilingColliders, roomVariant } from './build.js';
+ import { MenuScene } from './menuscene.js';
+@@ -57,6 +57,7 @@
+   power: $('power'), powerName: $('power-name'), powerKey: $('power-key'), powerFill: $('power-fill'),
+   talk: $('talk-indicator'),
+   prompt: $('prompt'), promptKeys: $('prompt-keys'), vignette: $('vignette'),
++  ingameMenu: $('ingame-menu'),
+   use: $('use'), useLabel: $('use-label'), useKey: $('use-key'),
+   hiding: $('hiding'), hidingKey: $('hiding-key'),
+   door: $('door-status'), doorCount: $('door-count'),
+@@ -92,13 +93,34 @@
+   // These three were only ever toggled by gameplay, so they sat on top of the
+   // main menu: the click-to-look prompt, the door counter and the carry line.
+   el.door.classList.toggle('hidden', !inGame);
+-  // There is nothing to capture on a touch device, and the prompt would just
+-  // sit there telling you to click.
+-  el.prompt.classList.toggle('hidden', TOUCH || !inGame || !!document.pointerLockElement);
++  syncPrompt();
+   $('touch').classList.toggle('hidden', !TOUCH || !inGame);
+   if (TOUCH && !inGame) el.rotate.classList.add('hidden');
+   if (!inGame) el.carrying.classList.add('hidden');
+   $('fullscreen').classList.toggle('hidden', !inGame);
++  el.ingameMenu.classList.toggle('hidden', !inGame);
++}
++
++/**
++ * Whether the click-to-look prompt belongs on screen.
++ *
++ * It used to be toggled from two places with two different conditions, neither
++ * of which knew about the other overlays. Release the mouse while you are on
++ * the floor and you got the prompt drawn straight over the knocked-out panel:
++ * two headings, two sets of body text and the ad button underneath both of
++ * them. One function, asked at every point the answer can change.
++ *
++ * Nothing to capture on a touch device, so it never shows there at all.
++ */
++function syncPrompt() {
++  const inGame = currentScreen === null;
++  const locked = !!document.pointerLockElement;
++  // Any overlay that owns the middle of the screen and has something to press.
++  const occupied = !el.downed.classList.contains('hidden')
++                || !el.vote.classList.contains('hidden')
++                || !el.tv.classList.contains('hidden')
++                || !el.board.classList.contains('hidden');
++  el.prompt.classList.toggle('hidden', TOUCH || !inGame || locked || occupied);
+ }
+ 
+ // Screens that sit over the diorama rather than blacking it out.
+@@ -326,12 +348,17 @@
+   run.player.releaseInput();
+   for (const r of run.remotes.values()) r.dispose(run.scene);
+   run.scene.traverse((o) => {
+-    if (o.isMesh || o.isLineSegments) {
+-      o.geometry?.dispose();
+-      if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
+-      else o.material?.dispose();
+-    }
++    if (!o.isMesh && !o.isLineSegments) return;
++    // Clones of a cached model share their geometry with the cache. Disposing
++    // it here freed the parsed GLB for every future run, so the second house
++    // came up with the furniture missing or garbled. The materials on those
++    // clones are ours and go with run.propMats below.
++    if (isPooled(o)) return;
++    o.geometry?.dispose();
++    if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
++    else o.material?.dispose();
+   });
++  run.propMats?.dispose();
+   run = null;
+ }
+ 
+@@ -475,6 +502,12 @@
+     roomMeshes.set(roomId, group);
+   }
+ 
++  // Everything imported gets relit. A GLB brings a MeshStandardMaterial with
++  // it, and there is not one light in this scene — the house is lit by a baked
++  // vertex attribute and a shader torch — so an untouched import renders as a
++  // black silhouette. See PropMaterials in material.js.
++  const propMats = new PropMaterials(material);
++
+   let modelled = 0;
+   for (const p of level.props) {
+     if (!hasModel(p.kind)) continue;
+@@ -483,6 +516,7 @@
+     if (p.fitScale) obj.scale.setScalar(p.fitScale);
+     obj.position.set(p.x, p.y ?? 0, p.z);
+     obj.rotation.y = p.facing;
++    propMats.apply(obj);
+     roomMeshes.get(p.room)?.add(obj);
+     modelled++;
+   }
+@@ -582,9 +616,7 @@
+     // all, and iOS supports neither. checkRotate() covers the failure.
+     lockLandscape().finally(checkRotate);
+   }
+-  player.onLockChange = (locked) => {
+-    el.prompt.classList.toggle('hidden', TOUCH || locked || currentScreen !== null);
+-  };
++  player.onLockChange = () => syncPrompt();
+ 
+   material.uniforms.uFlashRange.value *= loadout.stats.flashlightRange;
+ 
+@@ -599,6 +631,10 @@
+   for (const p of session.roster) {
+     if (p.id === session.localId) continue;
+     const r = new RemotePlayer(scene, p.id, p.name, rosterIndex(p.id), !isHost(), p.char);
++    // Same reason as the furniture: a teammate wearing a supplied model was a
++    // person-shaped hole in the dark. The capsule fallback is already self-lit,
++    // so only the modelled ones need this.
++    if (r.usesModel) propMats.apply(r.mesh);
+     const lo = new Loadout(characterById(p.char ?? DEFAULT_CHARACTER));
+     r.loudness = lo.stats.loudnessScale;
+     r.knifeDodge = lo.stats.knifeDodge;
+@@ -635,7 +671,7 @@
+   vis.update(player.pos.x, player.pos.z);
+ 
+   run = {
+-    difficulty, level, scene, material, player, remotes, ghosts, vis, grid,
++    difficulty, level, scene, material, propMats, player, remotes, ghosts, vis, grid,
+     loadout, loadouts, interact, lootItems, lootMat, beadMat, exitMat, exitRoom, pillar,
+     carrying: null, minigame: null, busyTerminals: new Map(), useTarget: null,
+     sheltered: null,
+@@ -1131,6 +1167,7 @@
+   if (run.boardOpen) closeBoard();
+   audio.hit();
+   el.downed.classList.remove('hidden');
++  syncPrompt();
+   el.downedTimer.textContent = String(Math.ceil(
+     run.downTimers.get(session.localId) ?? CONFIG.bleedOutSeconds,
+   ));
+@@ -1157,6 +1194,7 @@
+ function applyReviveLocal() {
+   run.player.downed = false;
+   el.downed.classList.add('hidden');
++  syncPrompt();
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -1374,6 +1412,12 @@
+   lastFrame = now;
+   run.time += dt;
+ 
++  // Four classList reads a frame, and in exchange the click-to-look prompt can
++  // never again be left showing on top of an overlay that opened without
++  // remembering to tell it. Every overlay in the game opens from somewhere
++  // different; this is the one place that sees all of them.
++  syncPrompt();
++
+   if (!run.over && run.begun) {
+     accumulator += dt;
+     let steps = 0;
+@@ -2478,6 +2522,16 @@
+   settingsUI.openTab('controls');
+   show('settings');
+ });
++// The same door, but always on screen. The prompt one only exists on desktop
++// and only while the mouse is free, so on a phone — no Escape key, no prompt —
++// settings were unreachable from the moment a run started, which also meant
++// the on-screen controls could not be moved without quitting to the menu.
++el.ingameMenu.addEventListener('click', (e) => {
++  e.stopPropagation();
++  if (!run || run.over) return;
++  settingsUI.openTab(TOUCH ? 'controls' : 'graphics');
++  show('settings');
++});
+ $('about-back').addEventListener('click', () => buildMenu());
+ $('mp-back').addEventListener('click', () => buildMenu());
+ $('modes-back').addEventListener('click', () => (isNet() ? renderSelect() : buildMenu()));
+--- /mnt/project/material.js	1979-12-31 00:00:00.000000000 +0000
++++ work/material.js	2026-09-06 02:35:29.486754554 +0000
+@@ -355,3 +355,183 @@
+     `,
+   });
+ }
++
++// ---------------------------------------------------------------------------
++// Supplied models: furniture, characters, anything that arrives as a .glb.
++//
++// This is the fix for "every model is a black cube".
++//
++// There is not a single THREE.Light in the house. All steady lighting lives in
++// the aLit vertex attribute the baker writes, and the torch is a hand-rolled
++// cone in the shader above. A GLB arrives carrying MeshStandardMaterial, which
++// is a physically based material and therefore needs lights to reflect — put
++// one in a scene with no lights and it renders exactly what it is told to
++// render, which is black. Nothing was wrong with the models; they were being
++// asked to reflect light that does not exist.
++//
++// So every material on an imported model is swapped for one built here: the
++// model's own base colour and texture, lit by the same torch, the same flare
++// and the same fog as the walls around it. MeshBasicMaterial rather than a raw
++// ShaderMaterial on purpose — three's own vertex pipeline comes with it, so
++// skinned characters, morph targets and vertex colours all keep working, and
++// the lighting is injected with onBeforeCompile rather than reimplemented.
++// ---------------------------------------------------------------------------
++
++const PROP_UNIFORMS = [
++  'uFlashPos', 'uFlashDir', 'uFlashColor', 'uFlashInner', 'uFlashOuter',
++  'uFlashRange', 'uFlashGain', 'uFlashOn', 'uFlashFlicker',
++  'uFlarePos', 'uFlareColor', 'uFlareRange', 'uFlareOn',
++  'uFogColor', 'uFogDensity',
++];
++
++const PROP_DECL = /* glsl */`
++uniform vec3  uFlashPos;
++uniform vec3  uFlashDir;
++uniform vec3  uFlashColor;
++uniform float uFlashInner;
++uniform float uFlashOuter;
++uniform float uFlashRange;
++uniform float uFlashGain;
++uniform float uFlashOn;
++uniform float uFlashFlicker;
++uniform vec3  uFlarePos;
++uniform vec3  uFlareColor;
++uniform float uFlareRange;
++uniform float uFlareOn;
++uniform vec3  uFogColor;
++uniform float uFogDensity;
++uniform float uAmbient;
++varying vec3 vPropWorld;
++varying vec3 vPropNormal;
++`;
++
++/**
++ * One material per distinct source material, per run.
++ *
++ * Per run matters: models are parsed once and cloned, and a three.js clone
++ * SHARES its material and geometry with the original. Disposing a run's scene
++ * therefore used to reach back into the model cache and free the very things
++ * the next run was going to clone, so the second house came up wrong. The
++ * materials here belong to the run and are disposed with it; the cached
++ * geometry is left alone (see the pooled flag in models.js).
++ */
++export class PropMaterials {
++  constructor(house) {
++    this.house = house;
++    this.cache = new Map();
++  }
++
++  /** Swap every material in a subtree. Returns the object, for chaining. */
++  apply(root) {
++    if (!root) return root;
++    root.traverse((o) => {
++      if (!o.isMesh && !o.isSkinnedMesh && !o.isPoints && !o.isLine) return;
++      o.material = Array.isArray(o.material)
++        ? o.material.map((m) => this._for(m))
++        : this._for(o.material);
++    });
++    return root;
++  }
++
++  _for(source) {
++    if (!source || source.isShaderMaterial) return source;
++    const key = `${source.uuid}`;
++    const hit = this.cache.get(key);
++    if (hit) return hit;
++    const made = this._build(source);
++    this.cache.set(key, made);
++    return made;
++  }
++
++  _build(source) {
++    const m = new THREE.MeshBasicMaterial({
++      map: source.map ?? null,
++      color: source.color ? source.color.clone() : new THREE.Color(0xffffff),
++      // Cut-out foliage, glass, decals: whatever the exporter asked for.
++      transparent: !!source.transparent,
++      opacity: source.opacity ?? 1,
++      alphaTest: source.alphaTest ?? 0,
++      alphaMap: source.alphaMap ?? null,
++      side: source.side ?? THREE.FrontSide,
++      vertexColors: !!source.vertexColors,
++      depthWrite: source.depthWrite !== false,
++      // Our own fog, matched to the house's, is applied below. Three's would
++      // be a second one on top of it.
++      fog: false,
++    });
++    m.name = `prop:${source.name || 'unnamed'}`;
++
++    const u = this.house.uniforms;
++    // 0.16 is a floor, not a light: enough that a chair in an unlit corner
++    // reads as a shape rather than a hole, dim enough that the torch is still
++    // the reason you can see anything.
++    const ambient = { value: 0.16 };
++
++    m.onBeforeCompile = (shader) => {
++      // SHARED BY REFERENCE. main.js writes the torch position onto the house
++      // material once a frame; sharing the uniform objects means these follow
++      // it with nobody having to remember they exist.
++      for (const name of PROP_UNIFORMS) shader.uniforms[name] = u[name];
++      shader.uniforms.uAmbient = ambient;
++
++      shader.vertexShader = shader.vertexShader
++        .replace('#include <common>', `#include <common>\n${PROP_DECL}`)
++        .replace('#include <project_vertex>', /* glsl */`
++          #include <project_vertex>
++          vec4 propWorld = modelMatrix * vec4(transformed, 1.0);
++          vPropWorld  = propWorld.xyz;
++          vPropNormal = normalize(mat3(modelMatrix) * normal);
++        `);
++
++      shader.fragmentShader = shader.fragmentShader
++        .replace('#include <common>', `#include <common>\n${PROP_DECL}`)
++        .replace('#include <tonemapping_fragment>', /* glsl */`
++          {
++            vec3 n = normalize(vPropNormal);
++            vec3 lightSum = vec3(uAmbient);
++
++            if (uFlashOn > 0.5) {
++              vec3  toFrag = vPropWorld - uFlashPos;
++              float d = length(toFrag);
++              vec3  L = toFrag / max(d, 1e-4);
++              float axis  = dot(L, uFlashDir);
++              float cone  = smoothstep(uFlashOuter, uFlashInner, axis);
++              float spill = smoothstep(uFlashOuter - 0.22, uFlashOuter, axis) * 0.22;
++              float att   = clamp(1.0 - d / uFlashRange, 0.0, 1.0);
++              att *= att;
++              // Half lambert. A model's normals are not the tidy axis-aligned
++              // ones the house is built from, and a hard dot leaves the far
++              // side of a chair as a black cut-out even under a full beam.
++              float ndl = mix(0.45, max(dot(n, -L), 0.0), 0.55);
++              lightSum += uFlashColor * ((cone + spill) * att * ndl * uFlashGain * uFlashFlicker);
++            }
++
++            if (uFlareOn > 0.5) {
++              vec3  toFlare = uFlarePos - vPropWorld;
++              float fd = length(toFlare);
++              vec3  FL = toFlare / max(fd, 1e-4);
++              float fatt = clamp(1.0 - fd / uFlareRange, 0.0, 1.0);
++              fatt *= fatt;
++              float fndl = mix(0.45, max(dot(n, FL), 0.0), 0.55);
++              lightSum += uFlareColor * (fatt * fndl * uFlareOn);
++            }
++
++            gl_FragColor.rgb *= lightSum;
++
++            float propDist = length(vPropWorld - cameraPosition);
++            float propFog  = 1.0 - exp(-uFogDensity * uFogDensity * propDist * propDist);
++            gl_FragColor.rgb = mix(gl_FragColor.rgb, uFogColor, clamp(propFog, 0.0, 1.0));
++          }
++          #include <tonemapping_fragment>
++        `);
++    };
++    // Two materials with identical injected code can share a compiled program.
++    m.customProgramCacheKey = () => 'prop-lit-v1';
++    return m;
++  }
++
++  dispose() {
++    for (const m of this.cache.values()) m.dispose();
++    this.cache.clear();
++  }
++}
+--- /mnt/project/models.js	1979-12-31 00:00:00.000000000 +0000
++++ work/models.js	2026-09-06 02:35:41.093396433 +0000
+@@ -73,6 +73,29 @@
+ const cache = new Map();
+ 
+ /**
++ * Mark a clone as belonging to the shared cache.
++ *
++ * Object3D.clone() copies the transform tree but SHARES geometry and materials
++ * with the original. A scene teardown that walks every mesh and calls
++ * geometry.dispose() therefore frees the parsed GLB itself, and the next run
++ * clones something that no longer has buffers on the GPU — which is why the
++ * furniture came back wrong on the second house and not the first. Anything
++ * carrying this flag is skipped by that teardown.
++ */
++function pool(copy) {
++  copy.userData.pooled = true;
++  return copy;
++}
++
++/** Is this object, or anything above it, a clone of a cached model? */
++export function isPooled(object) {
++  for (let o = object; o; o = o.parent) {
++    if (o.userData?.pooled) return true;
++  }
++  return false;
++}
++
++/**
+  * @returns {THREE.Object3D|null} a fresh clone, or null if the slot has no
+  *   model and the caller should build its primitive instead.
+  */
+@@ -81,7 +104,7 @@
+   if (!entry) return null;
+   const copy = entry.root.clone(true);
+   copy.animations = entry.animations;
+-  return copy;
++  return pool(copy);
+ }
+ 
+ /** Post-fit dimensions in metres, or null if the slot has no model. */
+@@ -116,7 +139,7 @@
+   if (!entry) return null;
+   const copy = entry.root.clone(true);
+   if (entry.size.y > 1e-4 && height) copy.scale.setScalar(height / entry.size.y);
+-  return copy;
++  return pool(copy);
+ }
+ 
+ /**
+@@ -167,7 +190,7 @@
+   const k = Math.min(w / s.x, h / s.y, d / s.z);
+   const copy = entry.root.clone(true);
+   copy.scale.setScalar(k);
+-  return { object: copy, w: s.x * k, h: s.y * k, d: s.z * k };
++  return { object: pool(copy), w: s.x * k, h: s.y * k, d: s.z * k };
+ }
+ 
+ export function animationsFor(slot) { return cache.get(slot)?.animations ?? []; }
+--- /mnt/project/settings.js	1979-12-31 00:00:00.000000000 +0000
++++ work/settings.js	2026-09-06 02:34:37.770750700 +0000
+@@ -43,16 +43,31 @@
+  * can reach the corners of.
+  */
+ export const TOUCH_DEFAULTS = {
+-  interact:   { x: 0.855, y: 0.720, size: 84 },
+-  power:      { x: 0.740, y: 0.520, size: 64 },
+-  sprint:     { x: 0.955, y: 0.480, size: 62 },
+-  crouch:     { x: 0.955, y: 0.815, size: 62 },
+-  flashlight: { x: 0.705, y: 0.880, size: 58 },
++  interact:   { x: 0.870, y: 0.720, size: 84 },
++  power:      { x: 0.745, y: 0.500, size: 64 },
++  // RUN lives on the LEFT, just above and right of the walking stick, the way
++  // every mobile shooter places it. It is a hold, and you hold it with the
++  // same thumb that is already steering — putting it under the right thumb
++  // meant letting go of aim to start sprinting.
++  sprint:     { x: 0.300, y: 0.315, size: 68 },
++  crouch:     { x: 0.955, y: 0.790, size: 62 },
++  flashlight: { x: 0.720, y: 0.855, size: 58 },
+   // Kept clear of the top-right corner: the timer and the door counter live
+   // there and the button was landing on top of both.
+   talk:       { x: 0.560, y: 0.115, size: 52 },
+ };
+ 
++/**
++ * Bumped whenever the default placement above changes.
++ *
++ * A saved layout is merged over the defaults, so anyone who has played before
++ * keeps their old positions forever — including the ones we just decided were
++ * wrong. This resets the placement once, and only the placement: binds, name,
++ * audio and graphics are untouched. Someone who has deliberately dragged their
++ * own buttons around loses that one arrangement, which is the trade.
++ */
++export const TOUCH_LAYOUT_VERSION = 2;
++
+ /** Order here is the order they appear in the controls screen. */
+ export const BINDABLE = [
+   { id: 'forward',    label: 'Walk forward',     def: 'KeyW' },
+@@ -93,6 +108,9 @@
+   binds: Object.fromEntries(BINDABLE.map((b) => [b.id, b.def])),
+   touch: {
+     layout: JSON.parse(JSON.stringify(TOUCH_DEFAULTS)),
++    // 1, not TOUCH_LAYOUT_VERSION: a save from before this key existed leaves
++    // the default in place, and the mismatch is exactly the signal we want.
++    layoutVersion: 1,
+     scale: 1.0,
+     opacity: 0.45,
+     stickSize: 132,
+@@ -125,6 +143,11 @@
+       // missing a key still boots with a sane value for it.
+       if (raw) deepMerge(this.data, JSON.parse(raw));
+     } catch { /* defaults */ }
++    if (this.data.touch.layoutVersion !== TOUCH_LAYOUT_VERSION) {
++      this.data.touch.layout = JSON.parse(JSON.stringify(TOUCH_DEFAULTS));
++      this.data.touch.layoutVersion = TOUCH_LAYOUT_VERSION;
++      this.save();
++    }
+   }
+ 
+   save() {
+@@ -136,11 +159,13 @@
+ 
+   reset() {
+     this.data = DEFAULTS();
++    this.data.touch.layoutVersion = TOUCH_LAYOUT_VERSION;
+     this.save();
+   }
+ 
+   resetTouchLayout() {
+     this.data.touch.layout = JSON.parse(JSON.stringify(TOUCH_DEFAULTS));
++    this.data.touch.layoutVersion = TOUCH_LAYOUT_VERSION;
+     this.data.touch.scale = 1.0;
+     this.data.touch.opacity = 0.45;
+     this.data.touch.stickSize = 132;
