@@ -22,8 +22,8 @@ export function buildFigure(c) {
   const dark = new THREE.MeshStandardMaterial({ color: 0x1d2129, roughness: 0.8 });
 
   const s = c.silhouette;
-  const width = s === 'broad' ? 0.42 : s === 'armoured' ? 0.45 : s === 'lean' ? 0.27 : 0.33;
-  const height = s === 'lean' ? 1.16 : s === 'broad' ? 0.98 : s === 'armoured' ? 1.02 : 1.06;
+  const width = s === 'broad' ? 0.42 : s === 'armoured' ? 0.45 : (s === 'lean' || s === 'watcher') ? 0.27 : 0.33;
+  const height = (s === 'lean' || s === 'watcher') ? 1.16 : s === 'broad' ? 0.98 : s === 'armoured' ? 1.02 : 1.06;
 
   const torso = new THREE.Mesh(new THREE.CapsuleGeometry(width, height, 6, 18), body);
   torso.position.y = 0.62 + height / 2 - 0.28;
@@ -95,6 +95,22 @@ export function buildFigure(c) {
     scarf.rotation.x = Math.PI / 2;
     scarf.position.y = head.position.y - width * 0.55;
     g.add(scarf);
+  }
+  if (s === 'watcher') {
+    // Glass over the eyes and nothing else. The one who is only ever looking.
+    const lens = new THREE.MeshStandardMaterial({
+      color: c.accent, emissive: c.accent, emissiveIntensity: 1.9, roughness: 0.25,
+    });
+    for (const side of [-1, 1]) {
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.062, 0.13, 14), lens);
+      barrel.rotation.x = Math.PI / 2;
+      barrel.position.set(side * width * 0.3, head.position.y + 0.02, -width * 0.62);
+      g.add(barrel);
+    }
+    const band = new THREE.Mesh(new THREE.TorusGeometry(width * 0.66, 0.028, 6, 20), trim);
+    band.rotation.x = Math.PI / 2;
+    band.position.y = head.position.y + 0.02;
+    g.add(band);
   }
 
   return g;

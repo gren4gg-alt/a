@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { CONFIG } from './level.js';
+import { AUTO_TINT, AUTO_TINT_THRESHOLD, AUTO_TINT_LIFT } from './assets.js';
 import { createHauntedTextures } from './textures.js';
 
 // One material for the entire house. Still unlit — all steady lighting lives in
@@ -318,6 +319,9 @@ export function createGhostMaterial() {
 export function createGlowMaterial(hex, opts = {}) {
   return new THREE.ShaderMaterial({
     transparent: true,
+    // depthTest:false is what actually makes something visible THROUGH a wall.
+    // depthWrite:false only stops it occluding whatever comes after it.
+    depthTest: opts.depthTest ?? true,
     depthWrite: opts.depthWrite ?? true,
     blending: opts.additive ? THREE.AdditiveBlending : THREE.NormalBlending,
     side: opts.side ?? THREE.FrontSide,
@@ -432,30 +436,62 @@ export class PropMaterials {
    * brightest object in the house in the meantime. See MODEL_TINT in
    * assets.js.
    */
-  apply(root, { tint = null } = {}) {
+  apply(root, { tint = null, slot = null } = {}) {
     if (!root) return root;
     root.traverse((o) => {
       if (!o.isMesh && !o.isSkinnedMesh && !o.isPoints && !o.isLine) return;
       o.material = Array.isArray(o.material)
-        ? o.material.map((m) => this._for(m, tint))
-        : this._for(o.material, tint);
+        ? o.material.map((m) => this._for(m, tint, slot))
+        : this._for(o.material, tint, slot);
     });
     return root;
   }
 
-  _for(source, tint) {
+  /**
+   * Did this material lose its shading on the way out of the modelling
+   * package?
+   *
+   * A procedural material — noise, gradients, a node graph — has nothing glTF
+   * can carry, so the exporter writes a plain white base colour and no map.
+   * That combination is the signature, and it is one nobody authors on
+   * purpose: a piece of furniture somebody deliberately made pure white would
+   * still normally have a texture on it. Anything with a map, vertex colours,
+   * or a base colour its author actually picked is left alone.
+   */
+  static lostItsShading(source) {
+    if (!source || source.map || source.vertexColors) return false;
+    const c = source.color;
+    if (!c) return true;
+    return c.r >= AUTO_TINT_THRESHOLD
+        && c.g >= AUTO_TINT_THRESHOLD
+        && c.b >= AUTO_TINT_THRESHOLD;
+  }
+
+  _for(source, tint, slot) {
     if (!source || source.isShaderMaterial) return source;
+
+    // An explicit tint wins and is used exactly as written. Otherwise repaint
+    // it only if it came across as flat white, which means the shading did not
+    // survive the export — and lift it, because a colour picked in a lit
+    // viewport is always too dark for a house with one torch in it.
+    let use = tint;
+    let lift = 1;
+    if (use === null && AUTO_TINT && PropMaterials.lostItsShading(source)) {
+      use = AUTO_TINT[slot] ?? AUTO_TINT._default ?? null;
+      lift = AUTO_TINT_LIFT ?? 1;
+    }
+
     // Two props sharing a source material but tinted differently are two
     // materials, so the tint has to be part of the key.
-    const key = `${source.uuid}|${tint ?? 'none'}`;
+    const key = `${source.uuid}|${use ?? 'none'}|${lift}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
-    const made = this._build(source, tint);
+    const made = this._build(source, use, lift);
     this.cache.set(key, made);
     return made;
   }
 
-  _build(source, tint) {
+  _build(source, tint, lift = 1) {
     const m = new THREE.MeshBasicMaterial({
       map: source.map ?? null,
       color: source.color ? source.color.clone() : new THREE.Color(0xffffff),
@@ -472,7 +508,13 @@ export class PropMaterials {
       fog: false,
     });
     if (tint !== null && tint !== undefined) {
-      m.color.multiply(new THREE.Color().setHex(tint, THREE.SRGBColorSpace));
+      // Multiply, not replace. On a model that came across white the base is
+      // 1,1,1 and this lands exactly on the tint; on one with a real colour or
+      // a texture an explicit MODEL_TINT shades what is already there rather
+      // than painting over it.
+      const c = new THREE.Color().setHex(tint, THREE.SRGBColorSpace);
+      if (lift !== 1) c.multiplyScalar(lift);
+      m.color.multiply(c);
     }
     m.name = `prop:${source.name || 'unnamed'}`;
 

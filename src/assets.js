@@ -71,6 +71,7 @@ export const MODEL_ASSETS = {
   player_scavenger:   { url: 'assets/models/scavenger.glb',   height: 1.75 },
   player_quiet:       { url: 'assets/models/quiet.glb',       height: 1.75 },
   player_warden:      { url: 'assets/models/warden.glb',      height: 1.80 },
+  player_lookout:     { url: 'assets/models/lookout.glb',     height: 1.75 },
   player_terminator:  { url: 'assets/models/terminator.glb',  height: 1.85 },
 
   // The blade it throws at you.
@@ -142,22 +143,86 @@ export const PROP_SIZE = {
   painting:  1.0,
 };
 
+// ---------------------------------------------------------------------------
+// Colour for models that arrive with none.
+//
+// glTF carries a base colour and image textures, and nothing else. A material
+// built out of procedural nodes — noise, gradients, a whole shader graph —
+// has nothing an exporter can write down, so it comes across as a plain white
+// base colour and the shading you set up never leaves the modelling package.
+// That is why some pieces are white and some are not: the ones that are fine
+// had an image texture in them, the ones that are not were procedural.
+//
+// THE REAL FIX IS TO BAKE. In Blender: select the mesh, add an Image Texture
+// node with a new blank image, select that node, Render Properties > set the
+// engine to Cycles, Bake > Bake Type: Diffuse with Direct and Indirect
+// unticked so you get colour only, then plug the baked image into Base Color
+// and re-export. Ten minutes per model and it looks like what you made.
+//
+// Everything below is what happens until then.
+// ---------------------------------------------------------------------------
+
 /**
- * Per-slot tint, as a hex colour. null leaves the model's own colour alone.
+ * Per-slot tint, as a hex colour. Multiplies whatever colour the model has.
  *
- * This exists for models that come out white. glTF only carries a base colour
- * and image textures — a material built out of procedural nodes has nothing to
- * export, so the exporter writes a plain white base colour and the shading you
- * set up in Blender is simply not in the file. The real fix is to bake those
- * nodes down to an image texture and re-export. This is the stopgap: it will
- * not give you wood grain, but it will stop a crate being the brightest thing
- * in a dark house.
+ * Set an entry here to force a specific colour on one slot. Anything not
+ * listed falls back to AUTO_TINT below, so you do not have to fill this in.
  */
 export const MODEL_TINT = {
   // crate:  0x8a6a44,
-  // table:  0x6f5334,
-  // shelf:  0x5f462c,
 };
+
+/**
+ * Applied automatically to any material that arrives with NO texture and a
+ * near-white base colour — which is exactly the signature of a procedural
+ * material that did not survive the export.
+ *
+ * A material carrying an image texture, or one with a base colour its author
+ * actually chose, is left completely alone: this only ever repaints the
+ * pieces that would otherwise be flat white. Set AUTO_TINT to null to turn
+ * the whole thing off and see the raw white for yourself.
+ *
+ * The colours are house timber and old paint, chosen to sit under the torch
+ * without becoming the brightest thing in the room.
+ */
+export const AUTO_TINT = {
+  // Taken off the chair script's own ColorRamp: its two stops are #240D03 and
+  // #6F3C1D in sRGB, and this is roughly where the noise sits between them.
+  chair:     0x512912,
+  table:     0x6f5334,
+  bed:       0x6a5a4a,
+  shelf:     0x5f462c,
+  cabinet:   0x655036,
+  crate:     0x8a6a44,
+  lamp:      0x8a7550,
+  rug:       0x6b4436,
+  painting:  0x5a4a38,
+  closet:    0x6b5a44,
+  door:      0x5a4632,
+  terminal:  0x4a4f55,
+  knife:     0x9aa0a6,
+  relic:     0xc9a63c,
+  // Anything not listed, including the player bodies.
+  _default:  0x8a8175,
+};
+
+/**
+ * How white a base colour has to be before AUTO_TINT steps in. 1.0 is pure
+ * white. Raise it towards 1 to only catch dead-white materials; lower it to
+ * catch pale greys as well.
+ */
+export const AUTO_TINT_THRESHOLD = 0.92;
+
+/**
+ * Brightens everything AUTO_TINT paints, before it is applied.
+ *
+ * The honest colour off a Blender ColorRamp is usually darker than it should
+ * be in here. Those values were picked under a render light; this house has
+ * one torch and a fog term that eats the rest, so a piece that reads as dark
+ * oak in the viewport reads as a hole in the floor in game. 1.0 uses the
+ * colours exactly as written above.
+ */
+export const AUTO_TINT_LIFT = 1.6;
 
 /**
  * Objects to throw away as soon as a .glb is parsed.

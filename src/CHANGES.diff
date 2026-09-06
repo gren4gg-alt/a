@@ -1,10 +1,18 @@
 # Patch against the original project files.
-# src/: assets.js models.js material.js main.js ui.js settings.js touch.js minigames.js boards.js interact.js difficulty.js
+# src/: assets.js models.js material.js main.js ui.js settings.js touch.js minigames.js boards.js interact.js difficulty.js generate.js characters.js preview.js
 # root: index.html
 
 --- /mnt/project/assets.js	1979-12-31 00:00:00.000000000 +0000
-+++ assets.js	2026-09-06 07:29:58.202833702 +0000
-@@ -101,3 +101,75 @@
++++ assets.js	2026-09-06 08:14:27.591393432 +0000
+@@ -71,6 +71,7 @@
+   player_scavenger:   { url: 'assets/models/scavenger.glb',   height: 1.75 },
+   player_quiet:       { url: 'assets/models/quiet.glb',       height: 1.75 },
+   player_warden:      { url: 'assets/models/warden.glb',      height: 1.80 },
++  player_lookout:     { url: 'assets/models/lookout.glb',     height: 1.75 },
+   player_terminator:  { url: 'assets/models/terminator.glb',  height: 1.85 },
+ 
+   // The blade it throws at you.
+@@ -101,3 +102,139 @@
  
  /** Set false to ignore assets/models entirely and use primitives. */
  export const USE_ASSET_MODELS = true;
@@ -49,22 +57,86 @@
 +  painting:  1.0,
 +};
 +
++// ---------------------------------------------------------------------------
++// Colour for models that arrive with none.
++//
++// glTF carries a base colour and image textures, and nothing else. A material
++// built out of procedural nodes — noise, gradients, a whole shader graph —
++// has nothing an exporter can write down, so it comes across as a plain white
++// base colour and the shading you set up never leaves the modelling package.
++// That is why some pieces are white and some are not: the ones that are fine
++// had an image texture in them, the ones that are not were procedural.
++//
++// THE REAL FIX IS TO BAKE. In Blender: select the mesh, add an Image Texture
++// node with a new blank image, select that node, Render Properties > set the
++// engine to Cycles, Bake > Bake Type: Diffuse with Direct and Indirect
++// unticked so you get colour only, then plug the baked image into Base Color
++// and re-export. Ten minutes per model and it looks like what you made.
++//
++// Everything below is what happens until then.
++// ---------------------------------------------------------------------------
++
 +/**
-+ * Per-slot tint, as a hex colour. null leaves the model's own colour alone.
++ * Per-slot tint, as a hex colour. Multiplies whatever colour the model has.
 + *
-+ * This exists for models that come out white. glTF only carries a base colour
-+ * and image textures — a material built out of procedural nodes has nothing to
-+ * export, so the exporter writes a plain white base colour and the shading you
-+ * set up in Blender is simply not in the file. The real fix is to bake those
-+ * nodes down to an image texture and re-export. This is the stopgap: it will
-+ * not give you wood grain, but it will stop a crate being the brightest thing
-+ * in a dark house.
++ * Set an entry here to force a specific colour on one slot. Anything not
++ * listed falls back to AUTO_TINT below, so you do not have to fill this in.
 + */
 +export const MODEL_TINT = {
 +  // crate:  0x8a6a44,
-+  // table:  0x6f5334,
-+  // shelf:  0x5f462c,
 +};
++
++/**
++ * Applied automatically to any material that arrives with NO texture and a
++ * near-white base colour — which is exactly the signature of a procedural
++ * material that did not survive the export.
++ *
++ * A material carrying an image texture, or one with a base colour its author
++ * actually chose, is left completely alone: this only ever repaints the
++ * pieces that would otherwise be flat white. Set AUTO_TINT to null to turn
++ * the whole thing off and see the raw white for yourself.
++ *
++ * The colours are house timber and old paint, chosen to sit under the torch
++ * without becoming the brightest thing in the room.
++ */
++export const AUTO_TINT = {
++  // Taken off the chair script's own ColorRamp: its two stops are #240D03 and
++  // #6F3C1D in sRGB, and this is roughly where the noise sits between them.
++  chair:     0x512912,
++  table:     0x6f5334,
++  bed:       0x6a5a4a,
++  shelf:     0x5f462c,
++  cabinet:   0x655036,
++  crate:     0x8a6a44,
++  lamp:      0x8a7550,
++  rug:       0x6b4436,
++  painting:  0x5a4a38,
++  closet:    0x6b5a44,
++  door:      0x5a4632,
++  terminal:  0x4a4f55,
++  knife:     0x9aa0a6,
++  relic:     0xc9a63c,
++  // Anything not listed, including the player bodies.
++  _default:  0x8a8175,
++};
++
++/**
++ * How white a base colour has to be before AUTO_TINT steps in. 1.0 is pure
++ * white. Raise it towards 1 to only catch dead-white materials; lower it to
++ * catch pale greys as well.
++ */
++export const AUTO_TINT_THRESHOLD = 0.92;
++
++/**
++ * Brightens everything AUTO_TINT paints, before it is applied.
++ *
++ * The honest colour off a Blender ColorRamp is usually darker than it should
++ * be in here. Those values were picked under a render light; this house has
++ * one torch and a fog term that eats the rest, so a piece that reads as dark
++ * oak in the viewport reads as a hole in the floor in game. 1.0 uses the
++ * colours exactly as written above.
++ */
++export const AUTO_TINT_LIFT = 1.6;
 +
 +/**
 + * Objects to throw away as soon as a .glb is parsed.
@@ -260,8 +332,25 @@
        const fitted = fit(scene, spec.height);
        cache.set(slot, {
 --- /mnt/project/material.js	1979-12-31 00:00:00.000000000 +0000
-+++ material.js	2026-09-06 07:30:22.164707531 +0000
-@@ -355,3 +355,198 @@
++++ material.js	2026-09-06 08:14:40.694756702 +0000
+@@ -1,5 +1,6 @@
+ import * as THREE from 'three';
+ import { CONFIG } from './level.js';
++import { AUTO_TINT, AUTO_TINT_THRESHOLD, AUTO_TINT_LIFT } from './assets.js';
+ import { createHauntedTextures } from './textures.js';
+ 
+ // One material for the entire house. Still unlit — all steady lighting lives in
+@@ -318,6 +319,9 @@
+ export function createGlowMaterial(hex, opts = {}) {
+   return new THREE.ShaderMaterial({
+     transparent: true,
++    // depthTest:false is what actually makes something visible THROUGH a wall.
++    // depthWrite:false only stops it occluding whatever comes after it.
++    depthTest: opts.depthTest ?? true,
+     depthWrite: opts.depthWrite ?? true,
+     blending: opts.additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+     side: opts.side ?? THREE.FrontSide,
+@@ -355,3 +359,236 @@
      `,
    });
  }
@@ -342,30 +431,62 @@
 +   * brightest object in the house in the meantime. See MODEL_TINT in
 +   * assets.js.
 +   */
-+  apply(root, { tint = null } = {}) {
++  apply(root, { tint = null, slot = null } = {}) {
 +    if (!root) return root;
 +    root.traverse((o) => {
 +      if (!o.isMesh && !o.isSkinnedMesh && !o.isPoints && !o.isLine) return;
 +      o.material = Array.isArray(o.material)
-+        ? o.material.map((m) => this._for(m, tint))
-+        : this._for(o.material, tint);
++        ? o.material.map((m) => this._for(m, tint, slot))
++        : this._for(o.material, tint, slot);
 +    });
 +    return root;
 +  }
 +
-+  _for(source, tint) {
++  /**
++   * Did this material lose its shading on the way out of the modelling
++   * package?
++   *
++   * A procedural material — noise, gradients, a node graph — has nothing glTF
++   * can carry, so the exporter writes a plain white base colour and no map.
++   * That combination is the signature, and it is one nobody authors on
++   * purpose: a piece of furniture somebody deliberately made pure white would
++   * still normally have a texture on it. Anything with a map, vertex colours,
++   * or a base colour its author actually picked is left alone.
++   */
++  static lostItsShading(source) {
++    if (!source || source.map || source.vertexColors) return false;
++    const c = source.color;
++    if (!c) return true;
++    return c.r >= AUTO_TINT_THRESHOLD
++        && c.g >= AUTO_TINT_THRESHOLD
++        && c.b >= AUTO_TINT_THRESHOLD;
++  }
++
++  _for(source, tint, slot) {
 +    if (!source || source.isShaderMaterial) return source;
++
++    // An explicit tint wins and is used exactly as written. Otherwise repaint
++    // it only if it came across as flat white, which means the shading did not
++    // survive the export — and lift it, because a colour picked in a lit
++    // viewport is always too dark for a house with one torch in it.
++    let use = tint;
++    let lift = 1;
++    if (use === null && AUTO_TINT && PropMaterials.lostItsShading(source)) {
++      use = AUTO_TINT[slot] ?? AUTO_TINT._default ?? null;
++      lift = AUTO_TINT_LIFT ?? 1;
++    }
++
 +    // Two props sharing a source material but tinted differently are two
 +    // materials, so the tint has to be part of the key.
-+    const key = `${source.uuid}|${tint ?? 'none'}`;
++    const key = `${source.uuid}|${use ?? 'none'}|${lift}`;
 +    const hit = this.cache.get(key);
 +    if (hit) return hit;
-+    const made = this._build(source, tint);
++    const made = this._build(source, use, lift);
 +    this.cache.set(key, made);
 +    return made;
 +  }
 +
-+  _build(source, tint) {
++  _build(source, tint, lift = 1) {
 +    const m = new THREE.MeshBasicMaterial({
 +      map: source.map ?? null,
 +      color: source.color ? source.color.clone() : new THREE.Color(0xffffff),
@@ -382,7 +503,13 @@
 +      fog: false,
 +    });
 +    if (tint !== null && tint !== undefined) {
-+      m.color.multiply(new THREE.Color().setHex(tint, THREE.SRGBColorSpace));
++      // Multiply, not replace. On a model that came across white the base is
++      // 1,1,1 and this lands exactly on the tint; on one with a real colour or
++      // a texture an explicit MODEL_TINT shades what is already there rather
++      // than painting over it.
++      const c = new THREE.Color().setHex(tint, THREE.SRGBColorSpace);
++      if (lift !== 1) c.multiplyScalar(lift);
++      m.color.multiply(c);
 +    }
 +    m.name = `prop:${source.name || 'unnamed'}`;
 +
@@ -461,7 +588,7 @@
 +  }
 +}
 --- /mnt/project/main.js	1979-12-31 00:00:00.000000000 +0000
-+++ main.js	2026-09-06 07:33:47.925808696 +0000
++++ main.js	2026-09-06 07:59:51.850380003 +0000
 @@ -9,18 +9,19 @@
    wallGeometry, floorGeometry, ceilingGeometry, propGeometry, propColliders,
  } from './build.js';
@@ -485,7 +612,7 @@
  import { BoardEditor } from './boards.js';
  import { showRewarded, initAds, adsEnabled, menuCooldownLeft, markMenuAdWatched,
           providerIsVerified, providerName } from './ads.js';
-@@ -57,8 +58,9 @@
+@@ -57,8 +58,10 @@
    power: $('power'), powerName: $('power-name'), powerKey: $('power-key'), powerFill: $('power-fill'),
    talk: $('talk-indicator'),
    prompt: $('prompt'), promptKeys: $('prompt-keys'), vignette: $('vignette'),
@@ -493,10 +620,11 @@
    use: $('use'), useLabel: $('use-label'), useKey: $('use-key'),
 -  hiding: $('hiding'), hidingKey: $('hiding-key'),
 +  hiding: $('hiding'), hidingKey: $('hiding-key'), hidingVerb: $('hiding-verb'),
++  ghostNear: $('ghost-near'),
    door: $('door-status'), doorCount: $('door-count'),
    tv: $('tv'), tvBody: $('tv-body'),
    board: $('board'), boardBody: $('board-body'), boardRoom: $('board-room'),
-@@ -71,6 +73,7 @@
+@@ -71,6 +74,7 @@
    vote: $('vote'), voteList: $('vote-list'), voteTimer: $('vote-timer'),
    giveUp: $('give-up'),
    touchEdit: $('touch-edit'), teWhich: $('te-which'), rotate: $('rotate'),
@@ -504,7 +632,7 @@
    voteWatch: $('vote-watch'), voteQuit: $('vote-quit'),
    carrying: $('carrying'), carryingName: $('carrying-name'),
    downed: $('downed'), downedTimer: $('downed-timer'), downedNote: $('downed-note'),
-@@ -92,13 +95,34 @@
+@@ -92,13 +96,35 @@
    // These three were only ever toggled by gameplay, so they sat on top of the
    // main menu: the click-to-look prompt, the door counter and the carry line.
    el.door.classList.toggle('hidden', !inGame);
@@ -515,6 +643,7 @@
    $('touch').classList.toggle('hidden', !TOUCH || !inGame);
    if (TOUCH && !inGame) el.rotate.classList.add('hidden');
    if (!inGame) el.carrying.classList.add('hidden');
++  if (!inGame) el.ghostNear.classList.add('hidden');
    $('fullscreen').classList.toggle('hidden', !inGame);
 +  el.ingameMenu.classList.toggle('hidden', !inGame);
 +}
@@ -542,7 +671,7 @@
  }
  
  // Screens that sit over the diorama rather than blacking it out.
-@@ -123,7 +147,11 @@
+@@ -123,7 +149,11 @@
      renderer.render(charRoom.scene, charRoom.camera);
      return;
    }
@@ -555,7 +684,7 @@
    menuScene.update(dt);
    menuScene.resize(window.innerWidth, window.innerHeight);
    renderer.render(menuScene.scene, menuScene.camera);
-@@ -319,6 +347,9 @@
+@@ -319,6 +349,9 @@
  
  function disposeRun() {
    if (!run) return;
@@ -565,7 +694,7 @@
    touchControls?.detach();
    if (TOUCH) { unlockOrientation(); el.rotate.classList.add('hidden'); }
    closeBoard();
-@@ -326,12 +357,17 @@
+@@ -326,12 +359,17 @@
    run.player.releaseInput();
    for (const r of run.remotes.values()) r.dispose(run.scene);
    run.scene.traverse((o) => {
@@ -588,7 +717,7 @@
    run = null;
  }
  
-@@ -475,30 +511,47 @@
+@@ -475,30 +513,47 @@
      roomMeshes.set(roomId, group);
    }
  
@@ -628,7 +757,7 @@
 +    // its own origin, so these two agree without an offset.
      obj.position.set(p.x, p.y ?? 0, p.z);
      obj.rotation.y = p.facing;
-+    propMats.apply(obj, { tint: MODEL_TINT[p.kind] ?? null });
++    propMats.apply(obj, { tint: MODEL_TINT[p.kind] ?? null, slot: p.kind });
      roomMeshes.get(p.room)?.add(obj);
      modelled++;
    }
@@ -649,7 +778,30 @@
    const grid = new ColliderGrid([
      ...buildColliders(wallBoxes),
      ...propColliders(level.props),
-@@ -582,9 +635,7 @@
+@@ -554,6 +609,22 @@
+   flare.visible = false;
+   scene.add(flare);
+ 
++  // The Lookout's mark. One marker per run, moved onto whichever ghost is
++  // currently pinned — there is only ever one mark at a time, and building it
++  // up front means the ability costs nothing to fire.
++  //
++  // depthTest off, so it is genuinely visible through walls. That is the whole
++  // ability: not "you can see it", but "everyone can see where it is going
++  // even though it is two rooms away".
++  const markMat = createGlowMaterial(0x8fd6ff, {
++    additive: true, depthTest: false, depthWrite: false, pulse: 0.55, gain: 2.0,
++  });
++  const mark = new THREE.Mesh(new THREE.OctahedronGeometry(0.20, 0), markMat);
++  mark.frustumCulled = false;
++  mark.renderOrder = 4;
++  mark.visible = false;
++  scene.add(mark);
++
+   // -- local player and loadout -------------------------------------------
+ 
+   const myIndex = Math.max(0, rosterIndex(session.localId));
+@@ -582,9 +653,7 @@
      // all, and iOS supports neither. checkRotate() covers the failure.
      lockLandscape().finally(checkRotate);
    }
@@ -660,18 +812,18 @@
  
    material.uniforms.uFlashRange.value *= loadout.stats.flashlightRange;
  
-@@ -599,6 +650,10 @@
+@@ -599,6 +668,10 @@
    for (const p of session.roster) {
      if (p.id === session.localId) continue;
      const r = new RemotePlayer(scene, p.id, p.name, rosterIndex(p.id), !isHost(), p.char);
 +    // Same reason as the furniture: a teammate wearing a supplied model was a
 +    // person-shaped hole in the dark. The capsule fallback is already self-lit,
 +    // so only the modelled ones need this.
-+    if (r.usesModel) propMats.apply(r.mesh);
++    if (r.usesModel) propMats.apply(r.mesh, { slot: `player_${p.char ?? DEFAULT_CHARACTER}` });
      const lo = new Loadout(characterById(p.char ?? DEFAULT_CHARACTER));
      r.loudness = lo.stats.loudnessScale;
      r.knifeDodge = lo.stats.knifeDodge;
-@@ -635,7 +690,7 @@
+@@ -635,13 +708,15 @@
    vis.update(player.pos.x, player.pos.z);
  
    run = {
@@ -680,7 +832,15 @@
      loadout, loadouts, interact, lootItems, lootMat, beadMat, exitMat, exitRoom, pillar,
      carrying: null, minigame: null, busyTerminals: new Map(), useTarget: null,
      sheltered: null,
-@@ -657,10 +712,13 @@
+     boardOpen: null, boardEditor: null, adRevives: 0, vote: null,
+     stateSeq: 0, snapSeq: 0, lastSnapSeq: -1,
+     exitBead, flare, flareUntil: 0, senseUntil: 0,
++    // The Lookout's mark: which ghost, and until when. Shared by everyone.
++    mark, markMat, markIndex: -1, markUntil: 0,
+     trapMat, trapGeo, trapGroup, traps: [],
+     carried: [], elapsed: 0, over: false, begun: !isNet(),
+     downTimers: new Map(), reviveProgress: 0, reviveTarget: null,
+@@ -657,10 +732,13 @@
    el.carry.textContent = 'nothing';
    el.seed.textContent = `seed ${level.seed}`;
    el.powerName.textContent = loadout.char.ability;
@@ -698,7 +858,7 @@
    el.doorCount.textContent = `0/${level.holders.length}`;
    el.promptKeys.innerHTML = promptText();
  
-@@ -674,9 +732,24 @@
+@@ -674,9 +752,24 @@
      show(null);
      lastFrame = performance.now();
      rafId = requestAnimationFrame(frame);
@@ -723,7 +883,126 @@
  function promptText() {
    const b = settings.data.binds;
    const k = (id) => `<b>${keyLabel(b[id])}</b>`;
-@@ -966,6 +1039,7 @@
+@@ -717,25 +810,14 @@
+  * its own step timer driven by how fast it is actually moving, so a hunting
+  * ghost audibly speeds up.
+  */
+-function ghostFootsteps(dt) {
+-  const heard = run.ghosts
+-    .map((g) => ({ g, d: g.distanceToPlayer }))
+-    .filter((e) => e.d < GHOST_EARSHOT)
+-    .sort((a, b) => a.d - b.d)
+-    .slice(0, 3);
+-
+-  for (const { g, d } of heard) {
+-    const speed = Math.hypot(g.vel.x, g.vel.z);
+-    if (speed < 0.35) continue;
+-    g.stepTimer = (g.stepTimer ?? Math.random() * 0.6) - dt * speed;
+-    if (g.stepTimer > 0) continue;
+-    g.stepTimer = 1.5;
+-    const near = 1 - d / GHOST_EARSHOT;
+-    audio.creak(near * near, g.state === 'hunt');
+-  }
+-}
+-
+-const GHOST_EARSHOT = 16;
++// Ghost footsteps used to live here: a creak per step for the three nearest,
++// scaled by distance. Removed. The proximity drone already tells you something
++// is close and does it continuously, so the creaks were a second cue saying
++// the same thing louder — and because they fired per step they turned every
++// patrol walking past a wall into a burst of noise you learned to tune out.
++// One cue that always means the same thing beats two that overlap.
++//
++// GHOST_EARSHOT went with them; the drone has always used its own 22 m range.
+ 
+ function nearestGhostDistance() {
+   let best = Infinity;
+@@ -762,21 +844,81 @@
+   // The Nurse's ability only exists while you are on the floor; everyone
+   // else's only exists while you are not.
+   if (id === 'nurse' ? !run.player.downed : run.player.downed) return;
++
++  // The Lookout has to have something to point at, and finding out costs a
++  // five minute cooldown — so it is checked BEFORE lo.fire() spends it. An
++  // ability that can be wasted on empty air by a mistimed button is not a
++  // five minute ability, it is a five minute punishment.
++  let extra = null;
++  if (id === 'lookout') {
++    const target = ghostInSight();
++    if (target < 0) {
++      el.powerName.textContent = 'Nothing in sight';
++      setTimeout(() => { if (run && !run.over) el.powerName.textContent = lo.char.ability; }, 1200);
++      return;
++    }
++    extra = { g: target };
++  }
++
+   if (!lo.fire()) return;
+ 
+-  applyPower(id, run.player.pos.x, run.player.pos.z, session.localId);
++  applyPower(id, run.player.pos.x, run.player.pos.z, session.localId, extra);
+   if (isNet()) {
+-    const payload = { c: id, x: r2(run.player.pos.x), z: r2(run.player.pos.z), i: rosterIndex(session.localId) };
++    const payload = {
++      c: id, x: r2(run.player.pos.x), z: r2(run.player.pos.z),
++      i: rosterIndex(session.localId), ...(extra ?? {}),
++    };
+     if (isHost()) session.net.broadcast(MSG.POWER, payload, true);
+     else session.net.toHost(MSG.POWER, payload, true);
+   }
+ }
+ 
++/**
++ * Which ghost the Lookout is looking at, or -1.
++ *
++ * "The nearest one you can see" is taken literally: in front of the camera,
++ * inside marking range, and not around a corner. The room-visibility set the
++ * renderer already maintains answers the last part for free — if the room it
++ * is standing in is not being drawn, you are not looking at it, whatever the
++ * angle says.
++ */
++function ghostInSight() {
++  const p = run.player.pos;
++  const dir = new THREE.Vector3();
++  camera.getWorldDirection(dir);
++
++  let best = -1, bestD = MARK_RANGE;
++  run.ghosts.forEach((g, i) => {
++    const dx = g.pos.x - p.x, dz = g.pos.z - p.z;
++    const d = Math.hypot(dx, dz);
++    if (d > bestD || d < 1e-3) return;
++    // Roughly within the front half of the view. Generous on purpose: you are
++    // being chased, and pixel-accurate aim is not the skill being tested.
++    if ((dx / d) * dir.x + (dz / d) * dir.z < 0.55) return;
++    if (!g.mesh.visible) return;
++    best = i; bestD = d;
++  });
++  return best;
++}
++
++/** How far the Lookout can reach to pin something. */
++const MARK_RANGE = 30;
++
+ /** Runs on every machine for anything visible; host-only bits are guarded. */
+-function applyPower(charId, x, z, ownerId) {
++function applyPower(charId, x, z, ownerId, extra = null) {
+   const mine = ownerId === session.localId;
+ 
+   switch (charId) {
++    case 'lookout': {
++      // Everyone runs this, not just the owner — the point of the mark is that
++      // the rest of the house can see it too.
++      const gi = extra?.g ?? -1;
++      if (gi < 0 || gi >= run.ghosts.length) break;
++      run.markIndex = gi;
++      run.markUntil = run.time + ABILITY_DURATION.lookout;
++      audio.pickup(80);
++      break;
++    }
+     case 'lamplighter': {
+       run.flare.position.set(x, 1.1, z);
+       run.flare.visible = true;
+@@ -966,6 +1108,7 @@
    run.boardEditor = null;
    el.boardBody.innerHTML = '';
    el.board.classList.add('hidden');
@@ -731,7 +1010,7 @@
  }
  
  // -- terminals -------------------------------------------------------------
-@@ -994,6 +1068,26 @@
+@@ -994,6 +1137,26 @@
    run.minigame = null;
    el.tv.classList.add('hidden');
    setTerminalBusy(id, false);
@@ -758,7 +1037,7 @@
  }
  
  function setTerminalBusy(id, on) {
-@@ -1131,6 +1225,7 @@
+@@ -1131,6 +1294,7 @@
    if (run.boardOpen) closeBoard();
    audio.hit();
    el.downed.classList.remove('hidden');
@@ -766,7 +1045,7 @@
    el.downedTimer.textContent = String(Math.ceil(
      run.downTimers.get(session.localId) ?? CONFIG.bleedOutSeconds,
    ));
-@@ -1140,7 +1235,7 @@
+@@ -1140,7 +1304,7 @@
    refreshAdRevive();
    const canSelfRevive = run.loadout.char.id === 'nurse' && run.loadout.ready;
    el.downedNote.textContent = canSelfRevive
@@ -775,7 +1054,7 @@
      : isNet() ? 'Someone has to come and pick you up.'
                : 'No one is coming for you. Alone, this is how it ends.';
  }
-@@ -1157,6 +1252,7 @@
+@@ -1157,6 +1321,7 @@
  function applyReviveLocal() {
    run.player.downed = false;
    el.downed.classList.add('hidden');
@@ -783,7 +1062,16 @@
  }
  
  // ---------------------------------------------------------------------------
-@@ -1374,6 +1470,12 @@
+@@ -1286,6 +1451,8 @@
+   if (!run || run.over) return;
+   run.over = true;
+   for (const g of run.ghosts) g.clearKnives();
++  run.mark.visible = false;
++  el.ghostNear.classList.add('hidden');
+   audio.silence();
+   escaped ? audio.escape() : audio.caught();
+   document.exitPointerLock?.();
+@@ -1374,6 +1541,12 @@
    lastFrame = now;
    run.time += dt;
  
@@ -796,7 +1084,60 @@
    if (!run.over && run.begun) {
      accumulator += dt;
      let steps = 0;
-@@ -2224,7 +2326,7 @@
+@@ -1532,7 +1705,6 @@
+   }
+ 
+   run.interact.update(dt, run.time);
+-  ghostFootsteps(dt);
+ 
+   // A screen that is on is telling the house where you are. Every few seconds
+   // it calls again, so a long puzzle is a long invitation.
+@@ -1623,7 +1795,35 @@
+   }
+   run.pillar.rotation.y += dt * 0.4;
+ 
++  // -- the Lookout ---------------------------------------------------------
++
++  // The mark rides whichever ghost was pinned until its forty seconds are up.
++  // Driven from the ghost's live position rather than a snapshot, which is the
++  // whole value of it: a marker that showed where the thing WAS would be worse
++  // than nothing.
++  const marked = run.markIndex >= 0 && run.time < run.markUntil
++    ? run.ghosts[run.markIndex] : null;
++  run.mark.visible = !!marked;
++  if (marked) {
++    run.mark.position.set(marked.pos.x, 2.55 + Math.sin(run.time * 2.4) * 0.09, marked.pos.z);
++    run.mark.rotation.y += dt * 1.8;
++    run.markMat.uniforms.uTime.value = run.time;
++  } else if (run.markIndex >= 0) {
++    run.markIndex = -1;
++  }
++
+   const d = nearestGhostDistance();
++
++  // The Lookout's passive. Deliberately directionless: it tells you one of
++  // them is inside twenty metres and nothing else, which turns a corridor into
++  // a decision instead of answering it for you. Everyone else has ghostSense 0
++  // and never sees this.
++  if (lo.stats.ghostSense > 0) {
++    const near = d < lo.stats.ghostSense && !p.dead;
++    el.ghostNear.classList.toggle('hidden', !near);
++    if (near) el.ghostNear.classList.toggle('close', d < lo.stats.ghostSense * 0.5);
++  }
++
+   const proximity = Math.max(0, 1 - d / 22);
+   const hunting = anyHunting();
+   audio.setTension(proximity, hunting);
+@@ -2041,7 +2241,7 @@
+     if (!run) return;
+     const ownerId = session.roster[d.i]?.id ?? from;
+     if (ownerId === session.localId) return;   // already applied locally
+-    applyPower(d.c, d.x, d.z, ownerId);
++    applyPower(d.c, d.x, d.z, ownerId, d.g !== undefined ? { g: d.g } : null);
+     if (isHost()) session.net.broadcast(MSG.POWER, d, true, from);
+   }));
+ 
+@@ -2224,7 +2424,7 @@
    el.charPassive.textContent = chosen.passive;
    el.charAbility.textContent = chosen.ability;
    el.charAbilityText.textContent = chosen.abilityText;
@@ -805,7 +1146,7 @@
      (chosen.cooldown ? ` · ${chosen.cooldown}s cooldown` : ' · once per run');
  
    el.charList.innerHTML = '';
-@@ -2435,6 +2537,9 @@
+@@ -2435,6 +2635,9 @@
    isTouch: TOUCH,
    onChange: () => { applyGraphics(); applyAudio(); if (run) el.promptKeys.innerHTML = promptText(); },
    onTest: (key) => { audio.resume(); if (key === 'sfx' || key === 'master') audio.pickup(60); },
@@ -815,7 +1156,7 @@
  });
  
  $('go-solo').addEventListener('click', () => {
-@@ -2478,6 +2583,16 @@
+@@ -2478,6 +2681,16 @@
    settingsUI.openTab('controls');
    show('settings');
  });
@@ -832,7 +1173,7 @@
  $('about-back').addEventListener('click', () => buildMenu());
  $('mp-back').addEventListener('click', () => buildMenu());
  $('modes-back').addEventListener('click', () => (isNet() ? renderSelect() : buildMenu()));
-@@ -2629,8 +2744,26 @@
+@@ -2629,8 +2842,26 @@
  // Moving the on-screen controls
  // ---------------------------------------------------------------------------
  
@@ -860,7 +1201,7 @@
    touchControls = touchControls ?? new TouchControls($('touch'));
    touchControls.applyLayout();
    touchControls.setEditMode(true);
-@@ -2641,29 +2774,85 @@
+@@ -2641,29 +2872,85 @@
    };
    $('touch').classList.remove('hidden');
    el.touchEdit.classList.remove('hidden');
@@ -953,7 +1294,7 @@
  }
  
  $('te-size').addEventListener('input', (e) => {
-@@ -2673,21 +2862,11 @@
+@@ -2673,21 +2960,11 @@
    $('te-size-value').textContent = `${e.target.value}px`;
    touchControls.applyLayout();
  });
@@ -975,7 +1316,7 @@
  $('te-landscape').addEventListener('change', (e) => {
    settings.data.touch.lockLandscape = e.target.checked;
    settings.save();
-@@ -2698,6 +2877,57 @@
+@@ -2698,6 +2975,57 @@
    touchControls?.applyLayout();
    syncTouchSliders();
  });
@@ -1567,60 +1908,192 @@
      this.notice = group;
    }
 --- /mnt/project/difficulty.js	1979-12-31 00:00:00.000000000 +0000
-+++ difficulty.js	2026-09-06 07:32:59.207734816 +0000
-@@ -22,7 +22,12 @@
++++ difficulty.js	2026-09-06 07:57:03.692973140 +0000
+@@ -22,7 +22,14 @@
  // A fixed count barely registered once houses got large: you could walk for
  // minutes without meeting anything.
  //
 -// closetShare and boardShare are fractions of the room count. Closets scale
-+// closetShare and boardShare are fractions of the room count. boardShare went
-+// up by about a third across every house: a chalkboard is the only way to
-+// leave anything for someone you are separated from, and at the old rate you
-+// could cross half a house without passing one.
++// closetShare and boardShare are fractions of the room count. boardShare is up
++// 60% on every house, and corridors now count as somewhere one can go: a
++// chalkboard is the only way to leave anything for someone you are separated
++// from, and at the old rate you could cross half a house without passing one.
++// A note in a passage is arguably the more useful one anyway — it is on the
++// route between two rooms rather than tucked inside one of them.
 +//
 +// Closets scale
  // hard with difficulty: at one ghost per seven rooms there has to be somewhere
  // to get off the floor, and the harder houses are where you need it.
  //
-@@ -34,7 +39,7 @@
+@@ -34,7 +41,7 @@
    {
      id: 'quiet',
      closetShare: 0.1,
 -    boardShare: 0.12,
-+    boardShare: 0.16,
++    boardShare: 0.19,
      ghostShare: 0.15,
      hearsVoice: false,
      label: 'Quiet',
-@@ -54,7 +59,7 @@
+@@ -54,7 +61,7 @@
    {
      id: 'restless',
      closetShare: 0.15,
 -    boardShare: 0.15,
-+    boardShare: 0.20,
++    boardShare: 0.24,
      ghostShare: 0.15,
      hearsVoice: false,
      label: 'Restless',
-@@ -74,7 +79,7 @@
+@@ -74,7 +81,7 @@
    {
      id: 'hunted',
      closetShare: 0.25,
 -    boardShare: 0.18,
-+    boardShare: 0.24,
++    boardShare: 0.29,
      ghostShare: 0.15,
      hearsVoice: true,
      label: 'Hunted',
-@@ -94,7 +99,7 @@
+@@ -94,7 +101,7 @@
    {
      id: 'starving',
      closetShare: 0.3,
 -    boardShare: 0.22,
-+    boardShare: 0.30,
++    boardShare: 0.35,
      ghostShare: 0.15,
      hearsVoice: true,
      label: 'Starving',
+--- /mnt/project/generate.js	1979-12-31 00:00:00.000000000 +0000
++++ generate.js	2026-09-06 07:57:09.538490901 +0000
+@@ -382,8 +382,13 @@
+   // Boards are the only way to leave something behind for the people you are
+   // separated from. Placed like everything else: against a wall, clear of the
+   // doorway spines and clear of the furniture.
++  // Corridors count. A board in a passage is arguably the more useful one:
++  // it is on the route between two rooms rather than tucked inside one, so
++  // somebody separated from you actually walks past it. Narrow passages with
++  // no clear stretch of wall simply fail againstWall() below and are skipped,
++  // which is the right filter and cheaper than guessing at widths here.
+   const boardRooms = rooms.filter(
+-    (r) => !r.isCorridor && r.id !== entrance.id && !r.isExit,
++    (r) => r.id !== entrance.id && !r.isExit,
+   );
+   shuffle(boardRooms, rand);
+   const boards = [];
+--- /mnt/project/characters.js	1979-12-31 00:00:00.000000000 +0000
++++ characters.js	2026-09-06 07:58:19.554289742 +0000
+@@ -11,6 +11,7 @@
+ //   sense    -> the loot beads that already exist for teammates
+ //   brace    -> the host's knockdown path
+ //   shove    -> the ghost's own stun timer
++//   mark     -> the same through-wall bead the loot and teammates already use
+ //
+ // Passives are free and always on. Actives are one key, one cooldown, no
+ // resource bar — this is a game about walking and panicking, not about managing
+@@ -103,6 +104,20 @@
+     stats: { braces: 1, bleedScale: 1.5 },
+   },
+   {
++    id: 'lookout',
++    price: 1600,
++    name: 'The Lookout',
++    tag: 'Knows before you do',
++    color: 0x8fd6ff,
++    accent: 0x2f7fa8,
++    silhouette: 'watcher',
++    passive: 'You feel one of them coming inside twenty metres, wall or no wall. It does not tell you which way.',
++    ability: 'Mark',
++    abilityText: 'Pin the nearest one you can actually see. For forty seconds everybody in the house watches it move, through everything. Five minutes before you can do it again.',
++    cooldown: 300,
++    stats: { ghostSense: 20 },
++  },
++  {
+     id: 'terminator',
+     price: 3200,
+     name: 'The Terminator',
+@@ -120,7 +135,7 @@
+ 
+ // The Lamplighter is free forever: there has to be someone to play as before
+ // anyone has earned anything, and a torch that reaches further is the least
+-// situational of the seven.
++// situational of the eight.
+ export const DEFAULT_CHARACTER = CHARACTERS[0].id;
+ 
+ export function characterById(id) {
+@@ -175,6 +190,7 @@
+   scavenger: 8,
+   quiet: 6,
+   warden: 5,
++  lookout: 40,
+ };
+ 
+ function defaultStats() {
+@@ -185,6 +201,9 @@
+     reviveScale: 1.0,
+     bleedScale: 1.0,
+     lootSense: 0,
++    // Metres at which a ghost sets off the Lookout's passive. 0 is everyone
++    // else, who get no warning at all.
++    ghostSense: 0,
+     braces: 0,
+     // Chance a knife that would have hit goes wide instead. Rolled on the
+     // host, so it cannot be re-rolled by the client it is about to hit.
+--- /mnt/project/preview.js	1979-12-31 00:00:00.000000000 +0000
++++ preview.js	2026-09-06 07:58:33.038647116 +0000
+@@ -22,8 +22,8 @@
+   const dark = new THREE.MeshStandardMaterial({ color: 0x1d2129, roughness: 0.8 });
+ 
+   const s = c.silhouette;
+-  const width = s === 'broad' ? 0.42 : s === 'armoured' ? 0.45 : s === 'lean' ? 0.27 : 0.33;
+-  const height = s === 'lean' ? 1.16 : s === 'broad' ? 0.98 : s === 'armoured' ? 1.02 : 1.06;
++  const width = s === 'broad' ? 0.42 : s === 'armoured' ? 0.45 : (s === 'lean' || s === 'watcher') ? 0.27 : 0.33;
++  const height = (s === 'lean' || s === 'watcher') ? 1.16 : s === 'broad' ? 0.98 : s === 'armoured' ? 1.02 : 1.06;
+ 
+   const torso = new THREE.Mesh(new THREE.CapsuleGeometry(width, height, 6, 18), body);
+   torso.position.y = 0.62 + height / 2 - 0.28;
+@@ -96,6 +96,22 @@
+     scarf.position.y = head.position.y - width * 0.55;
+     g.add(scarf);
+   }
++  if (s === 'watcher') {
++    // Glass over the eyes and nothing else. The one who is only ever looking.
++    const lens = new THREE.MeshStandardMaterial({
++      color: c.accent, emissive: c.accent, emissiveIntensity: 1.9, roughness: 0.25,
++    });
++    for (const side of [-1, 1]) {
++      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.062, 0.13, 14), lens);
++      barrel.rotation.x = Math.PI / 2;
++      barrel.position.set(side * width * 0.3, head.position.y + 0.02, -width * 0.62);
++      g.add(barrel);
++    }
++    const band = new THREE.Mesh(new THREE.TorusGeometry(width * 0.66, 0.028, 6, 20), trim);
++    band.rotation.x = Math.PI / 2;
++    band.position.y = head.position.y + 0.02;
++    g.add(band);
++  }
+ 
+   return g;
+ }
 --- /mnt/project/index.html	1979-12-31 00:00:00.000000000 +0000
-+++ index.html	2026-09-06 07:32:45.978249601 +0000
-@@ -250,7 +250,7 @@
++++ index.html	2026-09-06 07:59:38.070529715 +0000
+@@ -225,6 +225,18 @@
+   #power.ready #power-fill { background: var(--ember); }
+   #power.active #power-fill { background: var(--exit); }
+ 
++  #ghost-near { position: fixed; left: 50%; top: 12%; transform: translateX(-50%);
++                z-index: 11; pointer-events: none; text-align: center;
++                font-size: 0.74rem; letter-spacing: 0.22em; text-transform: uppercase;
++                color: #8fd6ff; text-shadow: 0 1px 12px rgba(0,0,0,0.9);
++                animation: ghost-near-pulse 2.2s ease-in-out infinite; }
++  /* Inside half the range it gets more insistent. Still no direction. */
++  #ghost-near.close { color: #ffb0a0; animation-duration: 0.9s; }
++  @keyframes ghost-near-pulse {
++    0%, 100% { opacity: 0.28; }
++    50%      { opacity: 0.85; }
++  }
++
+   #talk-indicator { position: fixed; right: 1.6rem; top: 1.4rem; z-index: 10; font-size: 0.76rem;
+                     color: var(--exit); letter-spacing: 0.14em; pointer-events: none;
+                     text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
+@@ -250,7 +262,7 @@
    #revive-track { width: 9rem; height: 2px; background: rgba(232,185,168,0.2); }
    #revive-bar { height: 100%; width: 0; background: var(--blood); }
  
@@ -1629,7 +2102,7 @@
              justify-items: center; gap: 0.5rem; text-align: center; pointer-events: none;
              background: rgba(40,4,2,0.35); }
    #downed strong { font-size: 1.45rem; font-weight: 300; letter-spacing: 0.22em; color: var(--blood); }
-@@ -311,19 +311,34 @@
+@@ -311,19 +323,34 @@
             border: 1px solid rgba(143,214,255,0.28); padding: 0.4rem 1rem; }
    .mg-go:hover { border-color: #8fd6ff; }
  
@@ -1667,7 +2140,7 @@
    #fullscreen-settings { width: auto; height: auto; position: static; border-radius: 0;
      display: inline-block; padding: 0.55rem 1.1rem; font-size: inherit; }
  
-@@ -461,16 +476,42 @@
+@@ -461,16 +488,42 @@
    #touch.editing .tc-look, #touch.editing .tc-stickzone { pointer-events: none; }
  
    /* ---- control customiser ---- */
@@ -1719,7 +2192,7 @@
  
    /* ---- turn the phone ---- */
    #rotate { position: fixed; inset: 0; z-index: 45; background: var(--void);
-@@ -581,27 +622,37 @@
+@@ -581,27 +634,37 @@
  </div>
  <div id="touch" class="hidden"></div>
  
@@ -1770,7 +2243,7 @@
    <div id="te-buttons">
      <button class="btn primary" id="te-done">Done</button>
      <button class="btn quiet" id="te-reset">Reset</button>
-@@ -629,6 +680,7 @@
+@@ -629,12 +692,17 @@
  <div id="roster-hud" class="hidden"></div>
  <div id="hud-timer" class="hidden">0:00</div>
  <button class="btn quiet hidden" id="fullscreen" title="Fullscreen">&#9974;</button>
@@ -1778,7 +2251,17 @@
  <div id="power" class="hidden">
    <div id="power-line"><span id="power-name">Flare</span> · <span id="power-key">Q</span></div>
    <div id="power-track"><div id="power-fill"></div></div>
-@@ -647,7 +699,7 @@
+ </div>
+ <div id="talk-indicator" class="hidden">talking</div>
+ 
++<!-- The Lookout's passive. No arrow, no distance, no count: it says one of
++     them is close and makes you decide what to do about it. -->
++<div id="ghost-near" class="hidden"><span>something is close</span></div>
++
+ <div id="prompt">
+   <strong>Click to look around</strong>
+   <div id="prompt-keys"></div>
+@@ -647,7 +715,7 @@
  <div id="use" class="hidden"><b id="use-key">E</b> <span id="use-label"></span></div>
  
  <div id="hiding" class="hidden">
@@ -1787,7 +2270,7 @@
  </div>
  
  <div id="tv" class="hidden"><div id="tv-body"></div></div>
-@@ -807,7 +859,7 @@
+@@ -807,7 +875,7 @@
    <h1>Settings</h1>
    <div id="settings-tabs">
      <button data-tab="audio" class="active">Audio</button>
@@ -1796,7 +2279,7 @@
      <button data-tab="graphics">Graphics</button>
    </div>
  
-@@ -839,20 +891,45 @@
+@@ -839,20 +907,45 @@
      </p>
    </div>
  

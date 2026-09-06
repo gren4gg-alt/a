@@ -61,6 +61,7 @@ const el = {
   ingameMenu: $('ingame-menu'),
   use: $('use'), useLabel: $('use-label'), useKey: $('use-key'),
   hiding: $('hiding'), hidingKey: $('hiding-key'), hidingVerb: $('hiding-verb'),
+  ghostNear: $('ghost-near'),
   door: $('door-status'), doorCount: $('door-count'),
   tv: $('tv'), tvBody: $('tv-body'),
   board: $('board'), boardBody: $('board-body'), boardRoom: $('board-room'),
@@ -99,6 +100,7 @@ function show(name) {
   $('touch').classList.toggle('hidden', !TOUCH || !inGame);
   if (TOUCH && !inGame) el.rotate.classList.add('hidden');
   if (!inGame) el.carrying.classList.add('hidden');
+  if (!inGame) el.ghostNear.classList.add('hidden');
   $('fullscreen').classList.toggle('hidden', !inGame);
   el.ingameMenu.classList.toggle('hidden', !inGame);
 }
@@ -546,7 +548,7 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     // its own origin, so these two agree without an offset.
     obj.position.set(p.x, p.y ?? 0, p.z);
     obj.rotation.y = p.facing;
-    propMats.apply(obj, { tint: MODEL_TINT[p.kind] ?? null });
+    propMats.apply(obj, { tint: MODEL_TINT[p.kind] ?? null, slot: p.kind });
     roomMeshes.get(p.room)?.add(obj);
     modelled++;
   }
@@ -607,6 +609,22 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
   flare.visible = false;
   scene.add(flare);
 
+  // The Lookout's mark. One marker per run, moved onto whichever ghost is
+  // currently pinned — there is only ever one mark at a time, and building it
+  // up front means the ability costs nothing to fire.
+  //
+  // depthTest off, so it is genuinely visible through walls. That is the whole
+  // ability: not "you can see it", but "everyone can see where it is going
+  // even though it is two rooms away".
+  const markMat = createGlowMaterial(0x8fd6ff, {
+    additive: true, depthTest: false, depthWrite: false, pulse: 0.55, gain: 2.0,
+  });
+  const mark = new THREE.Mesh(new THREE.OctahedronGeometry(0.20, 0), markMat);
+  mark.frustumCulled = false;
+  mark.renderOrder = 4;
+  mark.visible = false;
+  scene.add(mark);
+
   // -- local player and loadout -------------------------------------------
 
   const myIndex = Math.max(0, rosterIndex(session.localId));
@@ -653,7 +671,7 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     // Same reason as the furniture: a teammate wearing a supplied model was a
     // person-shaped hole in the dark. The capsule fallback is already self-lit,
     // so only the modelled ones need this.
-    if (r.usesModel) propMats.apply(r.mesh);
+    if (r.usesModel) propMats.apply(r.mesh, { slot: `player_${p.char ?? DEFAULT_CHARACTER}` });
     const lo = new Loadout(characterById(p.char ?? DEFAULT_CHARACTER));
     r.loudness = lo.stats.loudnessScale;
     r.knifeDodge = lo.stats.knifeDodge;
@@ -697,6 +715,8 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     boardOpen: null, boardEditor: null, adRevives: 0, vote: null,
     stateSeq: 0, snapSeq: 0, lastSnapSeq: -1,
     exitBead, flare, flareUntil: 0, senseUntil: 0,
+    // The Lookout's mark: which ghost, and until when. Shared by everyone.
+    mark, markMat, markIndex: -1, markUntil: 0,
     trapMat, trapGeo, trapGroup, traps: [],
     carried: [], elapsed: 0, over: false, begun: !isNet(),
     downTimers: new Map(), reviveProgress: 0, reviveTarget: null,
@@ -790,25 +810,14 @@ function addTrap(x, z) {
  * its own step timer driven by how fast it is actually moving, so a hunting
  * ghost audibly speeds up.
  */
-function ghostFootsteps(dt) {
-  const heard = run.ghosts
-    .map((g) => ({ g, d: g.distanceToPlayer }))
-    .filter((e) => e.d < GHOST_EARSHOT)
-    .sort((a, b) => a.d - b.d)
-    .slice(0, 3);
-
-  for (const { g, d } of heard) {
-    const speed = Math.hypot(g.vel.x, g.vel.z);
-    if (speed < 0.35) continue;
-    g.stepTimer = (g.stepTimer ?? Math.random() * 0.6) - dt * speed;
-    if (g.stepTimer > 0) continue;
-    g.stepTimer = 1.5;
-    const near = 1 - d / GHOST_EARSHOT;
-    audio.creak(near * near, g.state === 'hunt');
-  }
-}
-
-const GHOST_EARSHOT = 16;
+// Ghost footsteps used to live here: a creak per step for the three nearest,
+// scaled by distance. Removed. The proximity drone already tells you something
+// is close and does it continuously, so the creaks were a second cue saying
+// the same thing louder — and because they fired per step they turned every
+// patrol walking past a wall into a burst of noise you learned to tune out.
+// One cue that always means the same thing beats two that overlap.
+//
+// GHOST_EARSHOT went with them; the drone has always used its own 22 m range.
 
 function nearestGhostDistance() {
   let best = Infinity;
@@ -835,21 +844,81 @@ function firePower() {
   // The Nurse's ability only exists while you are on the floor; everyone
   // else's only exists while you are not.
   if (id === 'nurse' ? !run.player.downed : run.player.downed) return;
+
+  // The Lookout has to have something to point at, and finding out costs a
+  // five minute cooldown — so it is checked BEFORE lo.fire() spends it. An
+  // ability that can be wasted on empty air by a mistimed button is not a
+  // five minute ability, it is a five minute punishment.
+  let extra = null;
+  if (id === 'lookout') {
+    const target = ghostInSight();
+    if (target < 0) {
+      el.powerName.textContent = 'Nothing in sight';
+      setTimeout(() => { if (run && !run.over) el.powerName.textContent = lo.char.ability; }, 1200);
+      return;
+    }
+    extra = { g: target };
+  }
+
   if (!lo.fire()) return;
 
-  applyPower(id, run.player.pos.x, run.player.pos.z, session.localId);
+  applyPower(id, run.player.pos.x, run.player.pos.z, session.localId, extra);
   if (isNet()) {
-    const payload = { c: id, x: r2(run.player.pos.x), z: r2(run.player.pos.z), i: rosterIndex(session.localId) };
+    const payload = {
+      c: id, x: r2(run.player.pos.x), z: r2(run.player.pos.z),
+      i: rosterIndex(session.localId), ...(extra ?? {}),
+    };
     if (isHost()) session.net.broadcast(MSG.POWER, payload, true);
     else session.net.toHost(MSG.POWER, payload, true);
   }
 }
 
+/**
+ * Which ghost the Lookout is looking at, or -1.
+ *
+ * "The nearest one you can see" is taken literally: in front of the camera,
+ * inside marking range, and not around a corner. The room-visibility set the
+ * renderer already maintains answers the last part for free — if the room it
+ * is standing in is not being drawn, you are not looking at it, whatever the
+ * angle says.
+ */
+function ghostInSight() {
+  const p = run.player.pos;
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+
+  let best = -1, bestD = MARK_RANGE;
+  run.ghosts.forEach((g, i) => {
+    const dx = g.pos.x - p.x, dz = g.pos.z - p.z;
+    const d = Math.hypot(dx, dz);
+    if (d > bestD || d < 1e-3) return;
+    // Roughly within the front half of the view. Generous on purpose: you are
+    // being chased, and pixel-accurate aim is not the skill being tested.
+    if ((dx / d) * dir.x + (dz / d) * dir.z < 0.55) return;
+    if (!g.mesh.visible) return;
+    best = i; bestD = d;
+  });
+  return best;
+}
+
+/** How far the Lookout can reach to pin something. */
+const MARK_RANGE = 30;
+
 /** Runs on every machine for anything visible; host-only bits are guarded. */
-function applyPower(charId, x, z, ownerId) {
+function applyPower(charId, x, z, ownerId, extra = null) {
   const mine = ownerId === session.localId;
 
   switch (charId) {
+    case 'lookout': {
+      // Everyone runs this, not just the owner — the point of the mark is that
+      // the rest of the house can see it too.
+      const gi = extra?.g ?? -1;
+      if (gi < 0 || gi >= run.ghosts.length) break;
+      run.markIndex = gi;
+      run.markUntil = run.time + ABILITY_DURATION.lookout;
+      audio.pickup(80);
+      break;
+    }
     case 'lamplighter': {
       run.flare.position.set(x, 1.1, z);
       run.flare.visible = true;
@@ -1382,6 +1451,8 @@ function endRun(escaped, remoteElapsed) {
   if (!run || run.over) return;
   run.over = true;
   for (const g of run.ghosts) g.clearKnives();
+  run.mark.visible = false;
+  el.ghostNear.classList.add('hidden');
   audio.silence();
   escaped ? audio.escape() : audio.caught();
   document.exitPointerLock?.();
@@ -1634,7 +1705,6 @@ function simulate(dt) {
   }
 
   run.interact.update(dt, run.time);
-  ghostFootsteps(dt);
 
   // A screen that is on is telling the house where you are. Every few seconds
   // it calls again, so a long puzzle is a long invitation.
@@ -1725,7 +1795,35 @@ function simulate(dt) {
   }
   run.pillar.rotation.y += dt * 0.4;
 
+  // -- the Lookout ---------------------------------------------------------
+
+  // The mark rides whichever ghost was pinned until its forty seconds are up.
+  // Driven from the ghost's live position rather than a snapshot, which is the
+  // whole value of it: a marker that showed where the thing WAS would be worse
+  // than nothing.
+  const marked = run.markIndex >= 0 && run.time < run.markUntil
+    ? run.ghosts[run.markIndex] : null;
+  run.mark.visible = !!marked;
+  if (marked) {
+    run.mark.position.set(marked.pos.x, 2.55 + Math.sin(run.time * 2.4) * 0.09, marked.pos.z);
+    run.mark.rotation.y += dt * 1.8;
+    run.markMat.uniforms.uTime.value = run.time;
+  } else if (run.markIndex >= 0) {
+    run.markIndex = -1;
+  }
+
   const d = nearestGhostDistance();
+
+  // The Lookout's passive. Deliberately directionless: it tells you one of
+  // them is inside twenty metres and nothing else, which turns a corridor into
+  // a decision instead of answering it for you. Everyone else has ghostSense 0
+  // and never sees this.
+  if (lo.stats.ghostSense > 0) {
+    const near = d < lo.stats.ghostSense && !p.dead;
+    el.ghostNear.classList.toggle('hidden', !near);
+    if (near) el.ghostNear.classList.toggle('close', d < lo.stats.ghostSense * 0.5);
+  }
+
   const proximity = Math.max(0, 1 - d / 22);
   const hunting = anyHunting();
   audio.setTension(proximity, hunting);
@@ -2143,7 +2241,7 @@ function wireNet(net) {
     if (!run) return;
     const ownerId = session.roster[d.i]?.id ?? from;
     if (ownerId === session.localId) return;   // already applied locally
-    applyPower(d.c, d.x, d.z, ownerId);
+    applyPower(d.c, d.x, d.z, ownerId, d.g !== undefined ? { g: d.g } : null);
     if (isHost()) session.net.broadcast(MSG.POWER, d, true, from);
   }));
 

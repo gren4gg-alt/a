@@ -225,6 +225,18 @@
   #power.ready #power-fill { background: var(--ember); }
   #power.active #power-fill { background: var(--exit); }
 
+  #ghost-near { position: fixed; left: 50%; top: 12%; transform: translateX(-50%);
+                z-index: 11; pointer-events: none; text-align: center;
+                font-size: 0.74rem; letter-spacing: 0.22em; text-transform: uppercase;
+                color: #8fd6ff; text-shadow: 0 1px 12px rgba(0,0,0,0.9);
+                animation: ghost-near-pulse 2.2s ease-in-out infinite; }
+  /* Inside half the range it gets more insistent. Still no direction. */
+  #ghost-near.close { color: #ffb0a0; animation-duration: 0.9s; }
+  @keyframes ghost-near-pulse {
+    0%, 100% { opacity: 0.28; }
+    50%      { opacity: 0.85; }
+  }
+
   #talk-indicator { position: fixed; right: 1.6rem; top: 1.4rem; z-index: 10; font-size: 0.76rem;
                     color: var(--exit); letter-spacing: 0.14em; pointer-events: none;
                     text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
@@ -686,6 +698,10 @@
   <div id="power-track"><div id="power-fill"></div></div>
 </div>
 <div id="talk-indicator" class="hidden">talking</div>
+
+<!-- The Lookout's passive. No arrow, no distance, no count: it says one of
+     them is close and makes you decide what to do about it. -->
+<div id="ghost-near" class="hidden"><span>something is close</span></div>
 
 <div id="prompt">
   <strong>Click to look around</strong>

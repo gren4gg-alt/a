@@ -11,6 +11,7 @@
 //   sense    -> the loot beads that already exist for teammates
 //   brace    -> the host's knockdown path
 //   shove    -> the ghost's own stun timer
+//   mark     -> the same through-wall bead the loot and teammates already use
 //
 // Passives are free and always on. Actives are one key, one cooldown, no
 // resource bar — this is a game about walking and panicking, not about managing
@@ -103,6 +104,20 @@ export const CHARACTERS = [
     stats: { braces: 1, bleedScale: 1.5 },
   },
   {
+    id: 'lookout',
+    price: 1600,
+    name: 'The Lookout',
+    tag: 'Knows before you do',
+    color: 0x8fd6ff,
+    accent: 0x2f7fa8,
+    silhouette: 'watcher',
+    passive: 'You feel one of them coming inside twenty metres, wall or no wall. It does not tell you which way.',
+    ability: 'Mark',
+    abilityText: 'Pin the nearest one you can actually see. For forty seconds everybody in the house watches it move, through everything. Five minutes before you can do it again.',
+    cooldown: 300,
+    stats: { ghostSense: 20 },
+  },
+  {
     id: 'terminator',
     price: 3200,
     name: 'The Terminator',
@@ -120,7 +135,7 @@ export const CHARACTERS = [
 
 // The Lamplighter is free forever: there has to be someone to play as before
 // anyone has earned anything, and a torch that reaches further is the least
-// situational of the seven.
+// situational of the eight.
 export const DEFAULT_CHARACTER = CHARACTERS[0].id;
 
 export function characterById(id) {
@@ -175,6 +190,7 @@ export const ABILITY_DURATION = {
   scavenger: 8,
   quiet: 6,
   warden: 5,
+  lookout: 40,
 };
 
 function defaultStats() {
@@ -185,6 +201,9 @@ function defaultStats() {
     reviveScale: 1.0,
     bleedScale: 1.0,
     lootSense: 0,
+    // Metres at which a ghost sets off the Lookout's passive. 0 is everyone
+    // else, who get no warning at all.
+    ghostSense: 0,
     braces: 0,
     // Chance a knife that would have hit goes wide instead. Rolled on the
     // host, so it cannot be re-rolled by the client it is about to hit.

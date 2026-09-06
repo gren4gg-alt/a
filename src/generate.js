@@ -382,8 +382,13 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
   // Boards are the only way to leave something behind for the people you are
   // separated from. Placed like everything else: against a wall, clear of the
   // doorway spines and clear of the furniture.
+  // Corridors count. A board in a passage is arguably the more useful one:
+  // it is on the route between two rooms rather than tucked inside one, so
+  // somebody separated from you actually walks past it. Narrow passages with
+  // no clear stretch of wall simply fail againstWall() below and are skipped,
+  // which is the right filter and cheaper than guessing at widths here.
   const boardRooms = rooms.filter(
-    (r) => !r.isCorridor && r.id !== entrance.id && !r.isExit,
+    (r) => r.id !== entrance.id && !r.isExit,
   );
   shuffle(boardRooms, rand);
   const boards = [];
