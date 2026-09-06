@@ -157,14 +157,14 @@ export const MODEL_YAW = {
 };
 
 export const PROP_SIZE = {
-  chair:     1.0,
-  table:     1.0,
-  bed:       1.0,
+  chair:     1.6,
+  table:     1.6,
+  bed:       2.1,
   shelf:     1.0,
   cabinet:   1.0,
-  crate:     1.0,
+  crate:     1.2,
   lamp:      1.0,
-  rug:       1.0,
+  rug:       1.8,
   painting:  1.0,
 };
 
