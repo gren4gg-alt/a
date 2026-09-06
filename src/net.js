@@ -47,7 +47,7 @@ export const MSG = {
  * otherwise joins successfully and then behaves inexplicably, which is far
  * harder to diagnose than being told to refresh.
  */
-export const PROTOCOL = 5;
+export const PROTOCOL = 6;
 
 /**
  * A stable id for this browser, surviving refreshes.
@@ -57,6 +57,8 @@ export const PROTOCOL = 5;
  * times out — which is how the same person ends up listed twice. Matching on
  * this instead lets the host recognise a reconnect and replace them.
  */
+let memSession = null;
+
 export function sessionId() {
   const KEY = 'darkhouse.session.v1';
   try {
@@ -67,8 +69,13 @@ export function sessionId() {
     }
     return v;
   } catch {
-    this._mem = this._mem ?? `s${Math.random().toString(36).slice(2, 10)}`;
-    return this._mem;
+    // Private browsing, or storage blocked entirely. This used to write to
+    // `this`, which is undefined in a module — so the fallback threw and every
+    // join from such a browser arrived with no session id at all, meaning no
+    // rejoin was ever recognised. Module scope: stable for the tab's lifetime,
+    // which is enough to survive a rejoin without a refresh.
+    memSession ??= `s${Math.random().toString(36).slice(2, 10)}`;
+    return memSession;
   }
 }
 
@@ -93,6 +100,17 @@ export class Net {
     this.open = false;
     /** Host-side: return a reason string to refuse a connection, or null. */
     this.gate = null;
+    /** Peers turned away at the door, so their second channel is refused too. */
+    this.refused = new Set();
+    /**
+     * Whether this tab is still able to play.
+     *
+     * The transport answers pings on its own, independently of the game above
+     * it, so a tab that has crashed or lost its GPU context kept telling the
+     * host it was fine and the host waited on it forever. Cleared when the
+     * game gives up, so the heartbeat times us out like any other dead peer.
+     */
+    this.responsive = true;
   }
 
   on(type, fn) {
@@ -161,14 +179,21 @@ export class Net {
           metadata: { role: 'unrel' },
         });
 
-        this.conns.set(this.hostId, { rel, unrel, name: 'host' });
+        // lastSeen from the start: startHeartbeat reads `lastSeen ?? now`, so
+        // without it the host could never time out before saying anything.
+        this.conns.set(this.hostId, { rel, unrel, name: 'host', lastSeen: Date.now() });
         this._wire(this.hostId, rel);
         this._wire(this.hostId, unrel);
 
         rel.on('open', () => {
           clearTimeout(timer);
           this.open = true;
-          this.send(this.hostId, MSG.HELLO, { name }, true);
+          // The session id travels with HELLO as well as with the connection
+          // metadata. HELLO rides the reliable channel, which routinely opens
+          // before the unreliable one, so it is often the host's first sight of
+          // this player — and an entry created there without a session id can
+          // never be recognised as a reconnect afterwards.
+          this.send(this.hostId, MSG.HELLO, { name, sid: sessionId() }, true);
           this._emit('open', { id, code: this.code });
           resolve(this.code);
 
@@ -202,15 +227,37 @@ export class Net {
     }
 
     const role = conn.metadata?.role ?? 'rel';
+
+    // A refused peer opens TWO channels, and the gate only ever saw the
+    // reliable one. The unreliable one arrived separately, was never gated,
+    // and got an entry in this.conns — which broadcast() iterates. So somebody
+    // turned away at the door carried on receiving every position snapshot for
+    // the rest of the run. Refusals are remembered and both channels are shut.
+    if (this.refused.has(conn.peer)) {
+      try { conn.close(); } catch { /* already gone */ }
+      return;
+    }
+
     // Refuse before wiring anything up, so a rejected peer never lands in the
     // roster or receives a snapshot.
     if (role === 'rel' && this.gate) {
       const why = this.gate(conn);
       if (why) {
-        conn.on('open', () => {
-          conn.send({ t: 'no', d: { why } });
-          setTimeout(() => conn.close(), 400);
-        });
+        this.refused.add(conn.peer);
+        // Do not remember them forever: a version mismatch is fixed by a
+        // refresh, and a full room empties.
+        setTimeout(() => this.refused.delete(conn.peer), 60000);
+        // Close the sibling channel if it beat us here.
+        const sibling = this.conns.get(conn.peer);
+        if (sibling) {
+          try { sibling.rel?.close(); sibling.unrel?.close(); } catch { /* gone */ }
+          this.conns.delete(conn.peer);
+        }
+        const refuse = () => {
+          try { conn.send({ t: 'no', d: { why } }); } catch { /* gone */ }
+          setTimeout(() => { try { conn.close(); } catch { /* gone */ } }, 400);
+        };
+        conn.open ? refuse() : conn.on('open', refuse);
         return;
       }
     }
@@ -268,9 +315,16 @@ export class Net {
     this._hb = setInterval(() => {
       const now = Date.now();
       for (const [peerId, entry] of [...this.conns]) {
-        if (peerId === this.hostId && !this.isHost) continue;
+        const isTheHost = peerId === this.hostId && !this.isHost;
+
         if (now - (entry.lastSeen ?? now) > timeoutMs) {
-          this._emit('timeout', { id: peerId });
+          // A host that closed their tab is often not reported by PeerJS at
+          // all — the socket simply goes quiet. Previously the host was
+          // skipped entirely here, so a client sat in a house where nothing
+          // moved and never found out why. Now it is the same check as
+          // everyone else, with its own event because the answer is different.
+          if (isTheHost) this._emit('hostlost', { id: peerId });
+          else this._emit('timeout', { id: peerId });
           this._dropped(peerId);
           continue;
         }
@@ -288,7 +342,11 @@ export class Net {
         this._greeted = true;
         clearTimeout(this._handshake);
       }
-      if (raw.t === 'ping') { try { conn.send({ t: 'pong', d: 0 }); } catch { /* gone */ } return; }
+      if (raw.t === 'ping') {
+        if (!this.responsive) return;      // let them time us out; we are done
+        try { conn.send({ t: 'pong', d: 0 }); } catch { /* gone */ }
+        return;
+      }
       if (raw.t === 'pong') return;
       this._emit(raw.t, raw.d, peerId);
     });
@@ -299,6 +357,10 @@ export class Net {
   _dropped(peerId) {
     if (!this.conns.has(peerId)) return;
     this.conns.delete(peerId);
+    // On a client the host is not just another peer leaving; it is the end of
+    // the room. Both events fire, so anything that only cares about "somebody
+    // went" still works, and the host case can be handled properly on top.
+    if (!this.isHost && peerId === this.hostId) this._emit('hostlost', { id: peerId });
     this._emit('left', { id: peerId });
   }
 
@@ -336,6 +398,7 @@ export class Net {
     clearTimeout(this._handshake);
     try { this.peer?.destroy(); } catch { /* already gone */ }
     this.conns.clear();
+    this.refused.clear();
     this.handlers.clear();
     this.peer = null;
     this.open = false;

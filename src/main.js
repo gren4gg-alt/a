@@ -45,6 +45,7 @@ const el = {
   name: $('name'), joinCode: $('join-code'), menuError: $('menu-error'), bank: $('bank'),
   modeCards: $('mode-cards'), modeContinue: $('mode-continue'),
   code: $('code'), codeLine: $('code-line'), roster: $('roster'),
+  selectBack: $('select-back'),
   readyBtn: $('ready-btn'), startBtn: $('start-btn'),
   charList: $('char-list'), charName: $('char-name'), charTag: $('char-tag'),
   charPassive: $('char-passive'), charAbility: $('char-ability'),
@@ -61,7 +62,7 @@ const el = {
   ingameMenu: $('ingame-menu'),
   use: $('use'), useLabel: $('use-label'), useKey: $('use-key'),
   hiding: $('hiding'), hidingKey: $('hiding-key'), hidingVerb: $('hiding-verb'),
-  ghostNear: $('ghost-near'),
+  ghostNear: $('ghost-near'), toast: $('toast'),
   door: $('door-status'), doorCount: $('door-count'),
   tv: $('tv'), tvBody: $('tv-body'),
   board: $('board'), boardBody: $('board-body'), boardRoom: $('board-room'),
@@ -103,6 +104,9 @@ function show(name) {
   if (!inGame) el.ghostNear.classList.add('hidden');
   $('fullscreen').classList.toggle('hidden', !inGame);
   el.ingameMenu.classList.toggle('hidden', !inGame);
+  // The reticle has no JS owner of its own and used to sit in the dead centre
+  // of every menu screen. One class, so the stylesheet can decide.
+  document.body.classList.toggle('in-run', inGame);
 }
 
 /**
@@ -239,6 +243,11 @@ function reportCrash(what, err) {
   if (crashed) return;
   crashed = true;
   console.error(`[${what}]`, err);
+  // Stop telling the room we are fine. The transport answers pings by itself,
+  // so without this the host waits on a tab that will never move again. Guarded
+  // because this runs above session's declaration: a crash during module
+  // evaluation would otherwise die in the crash handler.
+  try { if (session?.net) session.net.responsive = false; } catch { /* not up yet */ }
   try { cancelAnimationFrame(rafId); } catch { /* not running */ }
   try { document.exitPointerLock?.(); } catch { /* not locked */ }
   const box = document.getElementById('crash');
@@ -274,9 +283,11 @@ function makeRenderer() {
   canvas.addEventListener('webglcontextlost', (e) => {
     e.preventDefault();
     cancelAnimationFrame(rafId);
+    if (session?.net) session.net.responsive = false;
     document.getElementById('ctxlost')?.classList.remove('hidden');
   }, false);
   canvas.addEventListener('webglcontextrestored', () => {
+    if (session?.net) session.net.responsive = true;
     document.getElementById('ctxlost')?.classList.add('hidden');
     // Every GPU-side object died with the context, so the house has to be
     // rebuilt. Returning to the lobby is honest; silently continuing is not.
@@ -2018,6 +2029,34 @@ function network(dt) {
 // Message wiring
 // ---------------------------------------------------------------------------
 
+/**
+ * Same browser, new peer id.
+ *
+ * A refresh, a second Join click, or leaving the lobby and coming back all hand
+ * out a fresh PeerJS id while the old connection is still live — which is how
+ * one person ended up in the roster twice. The browser's session id is the
+ * thing that identifies a person, so match on that and replace.
+ *
+ * Called from both the 'joined' path and the HELLO path, because either can be
+ * the first sight of a player: they arrive on separate channels and neither
+ * wins reliably.
+ */
+function hostDropStaleSession(net, sid, keepId) {
+  if (!sid) return;
+  const stale = session.roster.filter((p) => p.sid === sid && p.id !== keepId);
+  for (const p of stale) {
+    // Never the host's own seat. Hosting in one tab and joining from another
+    // shares a session id, and those are two genuine people in the room.
+    if (p.id === session.localId) continue;
+    net.kick(p.id, 'Reconnected from another tab.');
+    session.roster = session.roster.filter((r) => r.id !== p.id);
+    if (run) {
+      const r = run.remotes.get(p.id);
+      if (r) { r.dispose(run.scene); run.remotes.delete(p.id); }
+    }
+  }
+}
+
 function wireNet(net) {
   /**
    * Sender-role guards.
@@ -2059,36 +2098,32 @@ function wireNet(net) {
 
   net.on('joined', ({ id, name, sid }) => {
     if (!isHost()) return;
-
-    // A refresh gives them a brand new peer id while the old connection sits
-    // in the roster until it times out, which is how one person appeared
-    // twice. Match on the browser's stable session id and replace instead.
-    if (sid) {
-      const stale = session.roster.find((p) => p.sid === sid && p.id !== id);
-      if (stale) {
-        net.kick(stale.id, 'Reconnected from another tab.');
-        session.roster = session.roster.filter((p) => p.id !== stale.id);
-        if (run) {
-          const r = run.remotes.get(stale.id);
-          if (r) { r.dispose(run.scene); run.remotes.delete(stale.id); }
-        }
-      }
-    }
+    hostDropStaleSession(net, sid, id);
 
     // Checked again: the gate ran when the connection opened, and the roster
     // can have filled between then and now.
-    if (roomLocked || session.roster.length >= 6) { net.send(id, MSG.DENY, { why: 'The room closed.' }, true); return; }
-    if (!session.roster.some((p) => p.id === id)) {
-      session.roster.push({ id, sid, name: cleanName(name), ready: false, char: DEFAULT_CHARACTER });
-    }
+    // kick(), not send(DENY): send leaves them connected, and a connected peer
+    // is in net.conns, and broadcast() iterates net.conns. Somebody turned
+    // away for arriving sixth was still fed every snapshot of the run.
+    if (roomLocked || session.roster.length >= 6) { net.kick(id, 'The room closed.'); return; }
+
+    // This fires only once both channels are open, so HELLO has often created
+    // the entry already. Fill in the session id rather than skipping past it:
+    // an entry without one can never be matched as a reconnect later, which is
+    // exactly how the same person ended up listed twice.
+    const existing = session.roster.find((p) => p.id === id);
+    if (existing) existing.sid ??= sid;
+    else session.roster.push({ id, sid, name: cleanName(name), ready: false, char: DEFAULT_CHARACTER });
+
     broadcastLobby();
-    voice.callAll(net.peer, [...net.conns.keys()]);
+    voice.callAll(net.peer, voicePeerIds());
   });
 
   net.on('timeout', ({ id }) => {
     if (!isHost()) return;
     session.roster = session.roster.filter((p) => p.id !== id);
     broadcastLobby();
+    hostRecheckLoaded();
   });
 
   net.on(MSG.DENY, fromHost((d) => {
@@ -2106,10 +2141,16 @@ function wireNet(net) {
   }));
 
   net.on('left', ({ id }) => {
-    voice.drop(id);
+    // forget, not drop: drop() closes the call but leaves the retry backoff in
+    // place, so somebody who left and rejoined started halfway up the ladder.
+    voice.forget(id);
     if (isHost()) {
       session.roster = session.roster.filter((p) => p.id !== id);
       broadcastLobby();
+      // The person everyone was waiting on may be the person who just left.
+      // Without this the house stays frozen until the load watchdog fires,
+      // which is the better part of a minute of nobody being able to move.
+      hostRecheckLoaded();
     }
     if (run) {
       const r = run.remotes.get(id);
@@ -2119,13 +2160,19 @@ function wireNet(net) {
     if (currentScreen === 'select') renderSelect();
   });
 
-  net.on(MSG.HELLO, fromClient(({ name }, from) => {
+  net.on(MSG.HELLO, fromClient(({ name, sid }, from) => {
     if (!isHost()) return;
     if (roomLocked) return;
+    // HELLO rides the reliable channel, which routinely opens before the
+    // unreliable one — so this, not 'joined', is frequently the first sight of
+    // a player, and it has to do the same replacement.
+    hostDropStaleSession(net, sid, from);
     const entry = session.roster.find((p) => p.id === from);
-    if (entry) entry.name = cleanName(name);
-    else if (session.roster.length < 6) {
-      session.roster.push({ id: from, name: cleanName(name), ready: false, char: DEFAULT_CHARACTER });
+    if (entry) {
+      entry.name = cleanName(name);
+      if (sid) entry.sid = sid;
+    } else if (session.roster.length < 6) {
+      session.roster.push({ id: from, sid, name: cleanName(name), ready: false, char: DEFAULT_CHARACTER });
     }
     broadcastLobby();
   }));
@@ -2136,7 +2183,7 @@ function wireNet(net) {
     const me = meInRoster();
     if (me) { session.character = me.char ?? session.character; session.ready = !!me.ready; }
     if (currentScreen === 'select' || currentScreen === 'multiplayer') renderSelect();
-    voice.callAll(net.peer, roster.map((p) => p.id).filter((id) => id !== net.id));
+    voice.callAll(net.peer, voicePeerIds());
   }));
 
   net.on(MSG.CHAR, fromClient(({ char, ready }, from) => {
@@ -2309,24 +2356,137 @@ function wireNet(net) {
     // The channel opened but the host never replied: their tab is gone and the
     // signalling server has not noticed yet. Without this the player sits on a
     // connected-but-silent screen indefinitely.
-    voice.shutdown();
-    session.net?.destroy();
-    session.net = null;
-    session.mode = 'solo';
-    session.roster = [];
-    show('multiplayer');
-    showMenuError('That room is not answering. The host has probably closed it.');
+    roomClosed('That room is not answering. The host has probably closed it.');
+  });
+
+  // The host's tab closed, or their connection died. Two very different
+  // situations depending on whether the house had been entered yet.
+  net.on('hostlost', () => {
+    if (isHost() || !isNet()) return;   // already handled, or never applied
+    if (run && !run.over) continueAlone();
+    else roomClosed('The host closed the room.');
   });
 
   net.on('call', (call) => voice.accept(call));
+
+  // Keep trying, on a timer, for anybody in the room we still cannot hear.
+  //
+  // Every previous attempt to connect a voice pair happened on a roster
+  // change, and none of the things that break a pair change the roster: the
+  // other side switching their microphone on later, ICE failing once, a peer
+  // connection dropping mid-run. This is the loop that makes voice eventually
+  // work instead of working or not depending on join order.
+  clearInterval(voiceRetry);
+  voiceRetry = setInterval(() => {
+    if (!session.net?.peer || !voice.enabled) return;
+    voice.reconcile(session.net.peer, voicePeerIds());
+  }, 4000);
   net.on('error', (err) => showMenuError(err?.message ?? 'Connection lost.'));
 }
 
+/**
+ * The host has gone and there is still a house to get out of.
+ *
+ * The alternative was to end everyone's run because one person closed a tab,
+ * which is a miserable way to lose twenty minutes. The star topology means
+ * there is no room left to be in — every other player was reachable only
+ * through the host — but the house itself is entirely reproducible locally:
+ * the level was generated from a shared seed and already exists in memory, and
+ * the ghost logic is the same code on every machine, just gated behind
+ * isHost(). Dropping to solo hands that gate the key.
+ *
+ * The ghosts carry on from wherever the last snapshot left them rather than
+ * resetting, so the moment of handover is not a moment of safety.
+ */
+function continueAlone() {
+  const wasClient = session.mode === 'client';
+  clearInterval(voiceRetry);
+  voiceRetry = null;
+  voice.shutdown();
+  try { session.net?.destroy(); } catch { /* already down */ }
+  session.net = null;
+  session.mode = 'solo';
+  roomLocked = false;
+
+  // Everyone else was only ever reachable through the host, so they are gone
+  // whether or not their own tab is still open.
+  if (run) {
+    for (const r of run.remotes.values()) r.dispose(run.scene);
+    run.remotes.clear();
+    run.downTimers?.clear();
+    run.vote = null;
+    el.vote.classList.add('hidden');
+    // isHost() is now true, so the simulation this client has been watching
+    // becomes the simulation it runs. It must not also still be paused waiting
+    // for a BEGIN that will never arrive.
+    run.begun = true;
+  }
+
+  // rosterIndex() is used for colours and for the escape check; a roster with
+  // nobody in it makes both of those quietly wrong.
+  const me = session.roster.find((p) => p.id === session.localId);
+  session.roster = [{
+    id: session.localId,
+    name: me?.name ?? session.name,
+    char: me?.char ?? session.character,
+    ready: true, loaded: true,
+  }];
+
+  if (wasClient) toast('Everyone else is gone. Finish it on your own.');
+}
+
+/**
+ * A line across the middle of the screen that fades on its own.
+ *
+ * For things the player has to be told mid-run and cannot act on — the host
+ * leaving being the one that prompted it. Deliberately not a dialog: stopping
+ * a horror game to make somebody click OK is worse than the news.
+ */
+let toastTimer = null;
+function toast(message, seconds = 5) {
+  el.toast.textContent = message;
+  el.toast.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.toast.classList.add('hidden'), seconds * 1000);
+}
+
+/**
+ * The host left before anybody went in. Nothing to salvage: back to the menu
+ * with the reason, rather than a lobby that will never start.
+ */
+function roomClosed(why) {
+  clearInterval(voiceRetry);
+  voiceRetry = null;
+  voice.shutdown();
+  try { session.net?.destroy(); } catch { /* already down */ }
+  session.net = null;
+  session.mode = 'solo';
+  session.roster = [];
+  session.ready = false;
+  roomLocked = false;
+  disposeRun();
+  show('multiplayer');
+  showMenuError(why);
+}
+
 let loadWatch = null;
+let voiceRetry = null;
 
 function hostMarkLoaded(id) {
   const entry = session.roster.find((p) => p.id === id);
   if (entry) entry.loaded = true;
+  hostRecheckLoaded();
+}
+
+/**
+ * Has everyone still here finished baking?
+ *
+ * Split out because the answer changes when somebody LEAVES as well as when
+ * somebody reports in, and only the second case used to ask.
+ */
+function hostRecheckLoaded() {
+  if (!isHost() || !loadWatch) return;
+  if (!session.roster.length) return;
   if (session.roster.every((p) => p.loaded)) hostBegin();
 }
 
@@ -2371,7 +2531,9 @@ function hostWatchLoading(difficultyId, seed) {
 function broadcastLobby() {
   session.net?.broadcast(MSG.LOBBY, {
     roster: session.roster.map((p) => ({
-      id: p.id, sid: p.sid, name: p.name, ready: p.ready, char: p.char,
+      // Deliberately not sid. It is a persistent browser identifier, it is only
+      // ever the host's business, and nothing on a client reads it.
+      id: p.id, name: p.name, ready: p.ready, char: p.char,
     })),
     difficultyId: session.difficultyId,
   }, true);
@@ -2479,11 +2641,45 @@ function renderSelect() {
     const st = document.createElement('b');
     st.textContent = p.ready ? 'ready' : '…';
     row.append(dot, nm, ch, st);
+
+    // kickPlayer() has existed since the room did and nothing ever called it,
+    // which is why the host could not remove anybody. Only the host sees this,
+    // and never against themselves.
+    if (isNet() && isHost() && p.id !== session.localId) {
+      const kick = document.createElement('button');
+      kick.className = 'kick';
+      kick.type = 'button';
+      kick.title = `Remove ${p.name}`;
+      kick.setAttribute('aria-label', `Remove ${p.name}`);
+      kick.textContent = '\u00d7';
+      kick.addEventListener('click', (e) => {
+        e.stopPropagation();
+        // One tap arms it, the second does it. A misplaced click throwing
+        // somebody out of a room they queued for is not recoverable.
+        if (kick.dataset.armed !== '1') {
+          kick.dataset.armed = '1';
+          kick.textContent = 'remove?';
+          kick.classList.add('armed');
+          setTimeout(() => {
+            if (!kick.isConnected) return;
+            kick.dataset.armed = '0';
+            kick.textContent = '\u00d7';
+            kick.classList.remove('armed');
+          }, 2600);
+          return;
+        }
+        kickPlayer(p.id, p.name);
+      });
+      row.appendChild(kick);
+    }
+
     el.roster.appendChild(row);
   });
 
   el.codeLine.classList.toggle('hidden', !isNet());
   el.code.textContent = session.net?.code ?? '—';
+  // In a room this abandons it; solo it is just a step back to the houses.
+  el.selectBack.textContent = isNet() ? 'Leave' : 'Back';
   el.readyBtn.classList.toggle('hidden', !isNet());
   el.readyBtn.textContent = session.ready ? 'Not ready' : 'Ready';
   el.startBtn.classList.toggle('hidden', isNet() && !isHost());
@@ -2498,11 +2694,26 @@ function renderSelect() {
   show('select');
 }
 
+/**
+ * Everyone we should be trying to hear.
+ *
+ * NOT net.conns. On a client that map holds exactly one entry, the host — so
+ * anything driving voice off it only ever reaches the host and never the other
+ * four players. The roster is the only list that means the same thing on every
+ * machine.
+ */
+function voicePeerIds() {
+  if (!session.net) return [];
+  const ids = session.roster.map((p) => p.id).filter((id) => id && id !== session.localId);
+  // Before the first LOBBY lands the host has connections but no roster yet.
+  return ids.length ? ids : [...session.net.conns.keys()].filter((id) => id !== session.localId);
+}
+
 function kickPlayer(id, name) {
   if (!isHost() || !session.net) return;
   session.net.kick(id, 'The host removed you from the room.');
   session.roster = session.roster.filter((p) => p.id !== id);
-  voice.drop(id);
+  voice.forget(id);
   if (run) {
     const r = run.remotes.get(id);
     if (r) { r.dispose(run.scene); run.remotes.delete(id); }
@@ -2587,7 +2798,10 @@ function renderShop() {
         el.shopNote.textContent = result === 'bought'
           ? `${c.name} is yours.`
           : `You need ${(price - Bank.read()).toLocaleString()} more.`;
-        if (result === 'bought') session.character = c.id;
+        // Both, not just the equip: buying The Warden from its own button while
+        // previewing The Nurse used to leave you owning and wearing one while
+        // still looking at the other.
+        if (result === 'bought') { session.character = c.id; shopSelected = c.id; }
         renderShop();
         el.bank.textContent = Bank.read().toLocaleString();
       });
@@ -2597,7 +2811,6 @@ function renderShop() {
     card.append(text, side);
     el.shopList.appendChild(card);
   }
-  show('shop');
 }
 
 function refreshAdEarn() {
@@ -2623,7 +2836,7 @@ el.adEarn.addEventListener('click', async () => {
   refreshAdEarn();
 });
 
-$('open-shop').addEventListener('click', () => renderShop());
+$('open-shop').addEventListener('click', () => { renderShop(); show('shop'); });
 $('shop-back').addEventListener('click', () => buildMenu());
 
 setInterval(() => {
@@ -2704,7 +2917,7 @@ el.ingameMenu.addEventListener('click', (e) => {
   show('settings');
 });
 $('about-back').addEventListener('click', () => buildMenu());
-$('mp-back').addEventListener('click', () => buildMenu());
+$('mp-back').addEventListener('click', () => { dropNet(); buildMenu(); });
 $('modes-back').addEventListener('click', () => (isNet() ? renderSelect() : buildMenu()));
 
 $('exit').addEventListener('click', () => {
@@ -2719,14 +2932,58 @@ $('exit').addEventListener('click', () => {
 });
 $('farewell-back').addEventListener('click', () => buildMenu());
 
+// The lobby had no way out at all: no Back button, and Escape did not cover
+// this screen. The only exits were starting the run or reloading the page —
+// and reloading is exactly the new-peer-id-same-session-id case that used to
+// put somebody in the roster twice.
+$('select-back').addEventListener('click', () => {
+  if (isNet()) { dropNet(); buildMenu(); return; }
+  renderModes();
+});
+
 el.modeContinue.addEventListener('click', () => {
   if (isNet() && isHost()) broadcastLobby();
   renderSelect();
 });
 
+/**
+ * Let go of the room.
+ *
+ * Exactly one Net may be live at a time. A second Peer is a second peer id, and
+ * to the host that is a second player — so leaving a lobby, or opening a new
+ * connection, has to close the old one rather than merely stop referring to it.
+ * The heartbeat interval in particular kept a dead connection warm, which is
+ * why the host never timed the old entry out.
+ */
+function dropNet() {
+  clearInterval(voiceRetry);
+  voiceRetry = null;
+  voice.shutdown();
+  try { session.net?.destroy(); } catch { /* already down */ }
+  session.net = null;
+  session.mode = 'solo';
+  session.roster = [];
+  session.ready = false;
+  roomLocked = false;
+}
+
+/**
+ * Opening a room can take twelve seconds. Without this an impatient second
+ * click builds a second Peer with the same session id, and both arrive.
+ */
+let netBusy = false;
+function setNetBusy(busy) {
+  netBusy = busy;
+  $('host-btn').disabled = busy;
+  $('join-btn').disabled = busy;
+}
+
 $('host-btn').addEventListener('click', async () => {
+  if (netBusy) return;
+  setNetBusy(true);
   takeName('Host');
   audio.resume();
+  dropNet();
   const net = new Net();
   wireNet(net);
   try {
@@ -2739,16 +2996,24 @@ $('host-btn').addEventListener('click', async () => {
     await requestMic();
     renderModes();
   } catch {
+    // A rejected promise does not close the Peer, and a Peer left running will
+    // still open and announce itself later.
+    try { net.destroy(); } catch { /* never opened */ }
     show('multiplayer');
     showMenuError('Could not open a room. The signalling server may be busy.');
+  } finally {
+    setNetBusy(false);
   }
 });
 
 $('join-btn').addEventListener('click', async () => {
+  if (netBusy) return;
   const code = el.joinCode.value.trim().toUpperCase();
   if (code.length < 4) { showMenuError('That code looks too short.'); return; }
+  setNetBusy(true);
   takeName('Guest');
   audio.resume();
+  dropNet();
   const net = new Net();
   wireNet(net);
   try {
@@ -2760,7 +3025,13 @@ $('join-btn').addEventListener('click', async () => {
     await requestMic();
     renderSelect();
   } catch (err) {
+    // The twelve second timeout rejects the promise but leaves the Peer alive:
+    // it would open at thirteen seconds and greet the host, by which point the
+    // player has already pressed Join again and the host sees both.
+    try { net.destroy(); } catch { /* never opened */ }
     showMenuError(err?.message ?? 'Could not reach that house.');
+  } finally {
+    setNetBusy(false);
   }
 });
 
@@ -2808,7 +3079,7 @@ function updateMicUI() {
 el.mic.addEventListener('click', async () => {
   if (!voice.enabled) {
     const ok = await requestMic();
-    if (ok && session.net) voice.callAll(session.net.peer, [...session.net.conns.keys()]);
+    if (ok && session.net) voice.callAll(session.net.peer, voicePeerIds());
     return;
   }
   voice.setMuted(!voice.muted);
@@ -3100,9 +3371,16 @@ window.addEventListener('keydown', (e) => {
     (run && !run.over) ? show(null) : buildMenu();
     return;
   }
+  if (currentScreen === 'select') {
+    e.preventDefault();
+    if (isNet()) { dropNet(); buildMenu(); } else renderModes();
+    return;
+  }
   if (currentScreen === 'multiplayer' || currentScreen === 'modes') {
     e.preventDefault();
-    currentScreen === 'modes' && isNet() ? renderSelect() : buildMenu();
+    if (currentScreen === 'modes' && isNet()) { renderSelect(); return; }
+    dropNet();
+    buildMenu();
   }
 });
 
@@ -3113,6 +3391,17 @@ $('tv').addEventListener('mousedown', (e) => {
 $('board').addEventListener('mousedown', (e) => {
   if (e.target === $('board')) closeBoard();
 });
+
+// Any interaction at all is a chance to un-stick audio the browser refused to
+// start on its own. Cheap, idempotent, and it covers the case where somebody
+// joined before this tab had ever been clicked — which used to lose that
+// player's voice permanently.
+for (const type of ['pointerdown', 'keydown']) {
+  document.addEventListener(type, () => {
+    audio.resume();
+    if (voice.enabled) voice.resumeBlocked();
+  }, { passive: true });
+}
 
 document.addEventListener('click', (ev) => {
   if (TOUCH) return;                       // nothing to lock; the stick handles it

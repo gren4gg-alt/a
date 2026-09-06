@@ -4,7 +4,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import {
   MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS, PROP_SIZE,
-  ANIMATION_ASSETS, USE_ASSET_ANIMATIONS,
+  ANIMATION_ASSETS, USE_ASSET_ANIMATIONS, MODEL_YAW,
 } from './assets.js';
 
 // ---------------------------------------------------------------------------
@@ -95,7 +95,10 @@ function measure(object) {
   return new THREE.Box3().setFromObject(object);
 }
 
-function fit(object, targetHeight) {
+function fit(object, targetHeight, yawDegrees = 0) {
+  // Before anything is measured, so the recentring below is done on the model
+  // as it will actually stand rather than as it was exported.
+  if (yawDegrees) object.rotation.y = THREE.MathUtils.degToRad(yawDegrees);
   const box = measure(object);
   const size = new THREE.Vector3();
   box.getSize(size);
@@ -317,7 +320,7 @@ export function animationStates() {
  * Duplicated from animation.js rather than imported, to keep models.js free of
  * a dependency on it — this file is loaded by things that never animate.
  */
-function sourceHipsHeight(scene) {
+function sourceHips(scene) {
   let bone = null;
   scene.updateMatrixWorld(true);
   scene.traverse((o) => {
@@ -325,8 +328,17 @@ function sourceHipsHeight(scene) {
     const n = String(o.name).toLowerCase().replace(/[^a-z0-9]/g, '');
     if (n.replace(/mixamorig\d*/g, '') === 'hips') bone = o;
   });
-  if (!bone) return 0;
-  return new THREE.Vector3().setFromMatrixPosition(bone.matrixWorld).y;
+  if (!bone) return { worldY: 0, local: null };
+  return {
+    // How high off the floor this body's hips sit, for scaling motion between
+    // bodies of different heights.
+    worldY: new THREE.Vector3().setFromMatrixPosition(bone.matrixWorld).y,
+    // Where the clip's hip track STARTS from. Needed because a Mixamo hip
+    // track is an absolute local position, not an offset — so replaying it on
+    // another rig plants the body wherever the source rig's hips happened to
+    // be, which is what put characters through the floor.
+    local: bone.position.clone(),
+  };
 }
 
 /** Resolves once every configured animation has either loaded or failed. */
@@ -344,10 +356,8 @@ export async function loadAnimations() {
       const clip = gltf.animations?.[0];
       if (!clip) throw new Error('no clip');
       const scene = gltf.scene ?? gltf.scenes?.[0];
-      clips.set(state, {
-        clip,
-        hipsY: scene ? sourceHipsHeight(scene) : 0,
-      });
+      const hips = scene ? sourceHips(scene) : { worldY: 0, local: null };
+      clips.set(state, { clip, hipsY: hips.worldY, hipsLocal: hips.local });
       loaded.push(state);
     } catch {
       missing.push(state);
@@ -381,7 +391,7 @@ export async function loadModels(onProgress) {
         // makes the whole body vanish at the edge of the screen.
         if (o.isSkinnedMesh) { o.frustumCulled = false; skinned = true; }
       });
-      const fitted = fit(scene, spec.height);
+      const fitted = fit(scene, spec.height, MODEL_YAW[slot] ?? 0);
       cache.set(slot, {
         root: fitted.root, size: fitted.size, skinned,
         animations: gltf.animations ?? [],

@@ -1,4 +1,0 @@
-TypeError: audio.terminalNoise is not a function
-    at simulate (main.js:1558:60)
-    at step (main.js:1408:31)
-    at frame (main.js:1367:5)

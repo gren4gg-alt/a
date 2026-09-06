@@ -28,6 +28,17 @@
   .hidden { display: none !important; }
   em { font-style: normal; }
 
+  /* Menus are chrome, not a document. Dragging across the shop to turn the
+     figure and leaving half the card list highlighted is only ever an accident,
+     and on a phone a long press on a menu item raised a selection handle. The
+     room code is the one thing anybody has a reason to select — it exists to be
+     copied — and so are the fields you type into. */
+  body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  #code, input, textarea {
+    -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+  }
+  #code { cursor: text; }
+
   .screen {
     position: fixed; inset: 0; z-index: 30; background: var(--void);
     display: flex; flex-direction: column; align-items: center;
@@ -72,7 +83,9 @@
   .btn.quiet:hover { border-color: var(--line); color: var(--ink); }
 
   .col { display: flex; flex-direction: column; gap: 0.5rem; width: min(24rem, 90vw); }
-  .row-h { display: flex; gap: 0.5rem; }
+  /* Wraps: the select screen carries four controls now that there is a way
+     back out of a lobby, and a narrow window has nowhere to put them all. */
+  .row-h { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .row-h > input { flex: 1; min-width: 0; }
 
   #bank-line { color: var(--ink-dim); font-size: 0.85rem; }
@@ -98,10 +111,22 @@
   .card-meta { color: var(--ink-faint); font-size: 0.74rem; }
 
   /* ---- character select ---- */
+  /* Two panes.
+     Everything you read on the left, the person you are looking at on the
+     right. The right pane is not a fixed column: it takes all the width the
+     left one does not, so the figure stands in the middle of the empty half of
+     the screen rather than just clear of the cards. charroom.resize() measures
+     that pane and puts the figure at its centre, so the layout is the only
+     thing that has to know where the figure goes.
+     Neither pane draws a border of its own — the split should be felt, not
+     seen — and the whole block is left aligned by .screen.diorama, so capping
+     the reading column keeps the text at a sane measure however wide the
+     display is. */
   #select-body {
-    display: grid; grid-template-columns: minmax(0,1fr) 17rem; gap: 1.6rem;
-    width: min(52rem, 94vw); align-items: start;
+    display: grid; grid-template-columns: minmax(0, 34rem) minmax(15rem, 1fr);
+    gap: 1.6rem; width: 100%; align-items: start;
   }
+  #select-body > *, #shop-body > * { border: 0; background: none; min-width: 0; }
   @media (max-width: 780px) { #select-body { grid-template-columns: 1fr; } }
 
   #char-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.4rem; }
@@ -137,6 +162,14 @@
           background: none; border: 1px solid transparent; border-radius: 50%; }
   .kick:hover { color: #e08a6a; border-color: rgba(224,138,106,0.5); }
   .player-row.is-ready b { color: var(--exit); }
+  /* Host only. Quiet until hovered, because it is next to somebody's name. */
+  .player-row .kick { margin-left: 0.5rem; padding: 0.1rem 0.4rem; font-size: 0.72rem;
+    line-height: 1.5; background: none; border: 1px solid transparent; border-radius: 3px;
+    color: var(--ink-faint); cursor: pointer; opacity: 0.5; }
+  .player-row:hover .kick { opacity: 1; }
+  .player-row .kick:hover { color: var(--blood); border-color: var(--blood); }
+  .player-row .kick.armed { opacity: 1; color: var(--blood); border-color: var(--blood);
+    letter-spacing: 0.06em; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   #code-line { font-size: 0.82rem; color: var(--ink-dim); text-align: center; }
   #code { font-size: 1.4rem; color: var(--exit); letter-spacing: 0.4em; display: block; margin-top: 0.25rem; }
@@ -237,6 +270,13 @@
     50%      { opacity: 0.85; }
   }
 
+  #toast { position: fixed; left: 50%; top: 34%; transform: translateX(-50%);
+           z-index: 12; pointer-events: none; max-width: min(30rem, 84vw);
+           text-align: center; font-size: 0.9rem; line-height: 1.5;
+           color: var(--ink); text-shadow: 0 1px 14px rgba(0,0,0,0.95);
+           animation: toast-in 0.4s ease-out; }
+  @keyframes toast-in { from { opacity: 0; } to { opacity: 1; } }
+
   #talk-indicator { position: fixed; right: 1.6rem; top: 1.4rem; z-index: 10; font-size: 0.76rem;
                     color: var(--exit); letter-spacing: 0.14em; pointer-events: none;
                     text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
@@ -245,8 +285,12 @@
   #stats.on { display: block; }
   #stats b { font-weight: 500; color: var(--ink); }
 
-  #reticle { position: fixed; left: 50%; top: 50%; width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px;
+  /* Only during a run. Nothing in any script ever toggled this, so it sat in
+     the dead centre of every menu screen from the first paint onwards. */
+  #reticle { display: none;
+             position: fixed; left: 50%; top: 50%; width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px;
              border-radius: 50%; background: rgba(207,196,180,0.5); z-index: 10; pointer-events: none; }
+  body.in-run #reticle { display: block; }
 
   #prompt { position: fixed; inset: 0; z-index: 20; display: grid; place-content: center;
             justify-items: center; gap: 0.7rem; text-align: center;
@@ -416,9 +460,14 @@
   .rh.gone b { color: #5a4640; }
 
   /* ---- shop ---- */
-  #shop-body { display: grid; grid-template-columns: minmax(0,1fr) 16rem; gap: 2rem;
-               width: min(52rem, 94vw); align-items: start; }
+  #shop-body { display: grid; grid-template-columns: minmax(0, 34rem) minmax(15rem, 1fr);
+               gap: 2rem; width: 100%; align-items: start; }
   @media (max-width: 800px) { #shop-body { grid-template-columns: 1fr; } }
+  #shop-panel { display: grid; gap: 0.9rem; align-content: start; }
+  /* The figure is turned by dragging, so the pane it stands in must not
+     also try to be a text cursor. */
+  [data-drag-room] { cursor: grab; }
+  [data-drag-room]:active { cursor: grabbing; }
   #shop-list { display: grid; gap: 0.5rem; }
   /* Sticky and vertically centred: the list is long enough to scroll, and the
      figure sliding off the top of a scrolled page is worse than no preview. */
@@ -551,7 +600,7 @@
     #carrying { left: 0.8rem; right: auto; top: 13.2rem; font-size: 0.7rem; }
     #talk-indicator { left: 50%; right: auto; transform: translateX(-50%); top: 0.5rem; }
     #use { top: 42%; font-size: 0.82rem; }
-    #reticle { opacity: 0.35; }
+    body.in-run #reticle { opacity: 0.35; }
 
     /* The diorama scrim has to cover the whole width once the panel does, or
        the text sits on top of a lit wall and is unreadable. */
@@ -703,14 +752,20 @@
      them is close and makes you decide what to do about it. -->
 <div id="ghost-near" class="hidden"><span>something is close</span></div>
 
-<div id="prompt">
+<!-- Mid-run news the player cannot act on. Fades by itself. -->
+<div id="toast" class="hidden"></div>
+
+<!-- Hidden from the markup, not just by show(). The module is deferred and has
+     all of three.js to fetch first, so on a cold load these painted on top of
+     the main menu for as long as that took. -->
+<div id="prompt" class="hidden">
   <strong>Click to look around</strong>
   <div id="prompt-keys"></div>
   <button class="btn quiet" id="ingame-settings">Settings</button>
 </div>
 
 <div id="carrying" class="hidden">carrying <span id="carrying-name"></span></div>
-<div id="door-status">the door wants <span id="door-count">0/4</span></div>
+<div id="door-status" class="hidden">the door wants <span id="door-count">0/4</span></div>
 
 <div id="use" class="hidden"><b id="use-key">E</b> <span id="use-label"></span></div>
 
@@ -833,7 +888,7 @@
         <span id="char-key"></span>
       </div>
     </div>
-    <div id="preview-wrap">
+    <div id="preview-wrap" data-drag-room>
       <div id="char-name"></div>
       <div id="char-tag"></div>
     </div>
@@ -846,6 +901,7 @@
     set Microphone to Allow, then press Mic again. You can play without it.
   </p>
   <div class="row-h">
+    <button class="btn quiet" id="select-back">Leave</button>
     <button class="btn quiet hidden" id="ready-btn">Ready</button>
     <button class="btn off" id="mic">Mic <span id="mic-state">off</span></button>
     <button class="btn primary" id="start-btn">Go in</button>
@@ -858,8 +914,10 @@
   <p id="bank-line">banked <span id="shop-bank">0</span></p>
   <p id="shop-note"></p>
   <div id="shop-body">
-    <div id="shop-list"></div>
-    <div id="shop-preview-wrap">
+    <div id="shop-panel">
+      <div id="shop-list"></div>
+    </div>
+    <div id="shop-preview-wrap" data-drag-room>
       <div id="shop-name"></div>
       <div id="shop-tag"></div>
     </div>

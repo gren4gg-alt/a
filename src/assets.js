@@ -131,6 +131,31 @@ export const USE_ASSET_MODELS = true;
  * These are yours to play with. Nothing else in the game reads them, and
  * getting one wrong makes that model the wrong size and nothing more.
  */
+/**
+ * Half turns and quarter turns, in DEGREES, applied when a model is loaded.
+ *
+ * Blender is Z-up and its glTF exporter maps (x, y, z) to (x, z, -y), so
+ * Blender +Y leaves as glTF -Z. A Mixamo character imported into Blender faces
+ * -Y, which comes out as +Z — and three's forward is -Z. So every Mixamo
+ * character arrives back to front, which is why teammates moonwalk.
+ *
+ * Fixing it at export is tidier (see face_forward() in the bake script) and
+ * this is here for everything you would rather not re-export. Once a model is
+ * fixed at the source, set its entry to 0 or the two corrections cancel out
+ * and it is backwards again.
+ */
+export const MODEL_YAW = {
+  player:             180,
+  player_lamplighter: 180,
+  player_runner:      180,
+  player_nurse:       180,
+  player_scavenger:   180,
+  player_quiet:       180,
+  player_warden:      180,
+  player_lookout:     180,
+  player_terminator:  180,
+};
+
 export const PROP_SIZE = {
   chair:     1.0,
   table:     1.0,

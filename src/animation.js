@@ -55,24 +55,6 @@ function boneIndex(root) {
 }
 
 /**
- * Rest height of the hips, in whatever units this skeleton uses.
- *
- * This is the yardstick the position scaling is built on, and it works because
- * the hips are the one bone whose height off the floor is a property of the
- * body rather than the pose.
- */
-export function hipsRestHeight(root) {
-  let found = null;
-  root.updateMatrixWorld(true);
-  root.traverse((o) => {
-    if (found) return;
-    if (normaliseBone(o.name) === 'hips') found = o;
-  });
-  if (!found) return 0;
-  return new THREE.Vector3().setFromMatrixPosition(found.matrixWorld).y;
-}
-
-/**
  * Rebuild a clip so it drives THIS character's bones.
  *
  * Tracks whose bone has no counterpart are dropped rather than left to fail
@@ -85,11 +67,10 @@ export function hipsRestHeight(root) {
  * retargeted character come out with the proportions of whoever the animation
  * was downloaded on.
  */
-export function retarget(clip, targetRoot, sourceHipsY) {
+export function retarget(clip, targetRoot, source, rest) {
   const bones = boneIndex(targetRoot);
-  const targetHipsY = hipsRestHeight(targetRoot);
-  const scale = (sourceHipsY > 1e-6 && targetHipsY > 1e-6)
-    ? targetHipsY / sourceHipsY
+  const scale = (source.hipsY > 1e-6 && rest.hipsY > 1e-6)
+    ? rest.hipsY / source.hipsY
     : 1;
 
   const tracks = [];
@@ -107,17 +88,61 @@ export function retarget(clip, targetRoot, sourceHipsY) {
       tracks.push(new THREE.QuaternionKeyframeTrack(
         `${actual}.quaternion`, Array.from(track.times), Array.from(track.values),
       ));
-    } else if (property === 'position' && key === 'hips') {
-      const values = Array.from(track.values, (v) => v * scale);
-      tracks.push(new THREE.VectorKeyframeTrack(
-        `${actual}.position`, Array.from(track.times), values,
-      ));
+      continue;
     }
-    // Everything else — scale tracks, non-hip positions, morph weights — is
-    // deliberately discarded.
+
+    if (property !== 'position' || key !== 'hips') continue;
+
+    // ANCHORED, not just scaled. This is the fix for characters standing in
+    // the floor.
+    //
+    // A Mixamo hip track holds an absolute local position, so replaying it on
+    // another rig plants the body at whatever height the SOURCE rig's hips sat
+    // at. Two rigs a few centimetres apart put a character ankle-deep in the
+    // boards; a rig exported at a different unit scale buries it completely.
+    // And because it depends on which clip happens to be playing, it looks
+    // intermittent — which is exactly how it was described.
+    //
+    // So only the MOTION is taken from the clip. Where that motion starts from
+    // is this body's own rest pose, which is by definition the height at which
+    // its feet are on the floor.
+    const from = source.hipsLocal;
+    const to = rest.hipsLocal;
+    const values = Array.from(track.values);
+    if (from && to) {
+      for (let i = 0; i + 2 < values.length; i += 3) {
+        values[i]     = to.x + (values[i]     - from.x) * scale;
+        values[i + 1] = to.y + (values[i + 1] - from.y) * scale;
+        values[i + 2] = to.z + (values[i + 2] - from.z) * scale;
+      }
+    } else {
+      for (let i = 0; i < values.length; i++) values[i] *= scale;
+    }
+    tracks.push(new THREE.VectorKeyframeTrack(
+      `${actual}.position`, Array.from(track.times), values,
+    ));
   }
 
   return new THREE.AnimationClip(clip.name, clip.duration, tracks);
+}
+
+/**
+ * This body's rest measurements, taken once before any clip has moved it.
+ *
+ * Has to happen before the first action plays: read them afterwards and the
+ * hips are wherever the animation currently has them, and every clip
+ * retargeted from then on is anchored to a moving target.
+ */
+export function restPose(root) {
+  let hips = null;
+  root.updateMatrixWorld(true);
+  root.traverse((o) => {
+    if (!hips && normaliseBone(o.name) === 'hips') hips = o;
+  });
+  return {
+    hipsY: hips ? new THREE.Vector3().setFromMatrixPosition(hips.matrixWorld).y : 0,
+    hipsLocal: hips ? hips.position.clone() : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +166,10 @@ export class CharacterAnimator {
   /** @param root the character's model, already cloned for this instance */
   constructor(root) {
     this.root = root;
+    // BEFORE the mixer exists, let alone plays anything. Every clip is
+    // anchored to these numbers, and reading them off a body that is already
+    // mid-animation anchors it to a moving target.
+    this.rest = restPose(root);
     this.mixer = new THREE.AnimationMixer(root);
     this.actions = new Map();     // state -> AnimationAction, or null if none
     this.clips = new Map();       // source state -> retargeted clip, or null
@@ -166,7 +195,7 @@ export class CharacterAnimator {
       let clip = this.clips.get(candidate);
       if (clip === undefined) {
         const src = animationSource(candidate);
-        clip = src ? retarget(src.clip, this.root, src.hipsY) : null;
+        clip = src ? retarget(src.clip, this.root, src, this.rest) : null;
         // A clip with no tracks bound to nothing; remember that so we do not
         // pay to retarget it again for every state that falls back to it.
         if (clip && !clip.tracks.length) clip = null;

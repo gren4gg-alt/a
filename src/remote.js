@@ -21,6 +21,18 @@ import { CharacterAnimator, stateFor } from './animation.js';
 const INTERP_DELAY = 120;   // ms
 const BUFFER_KEEP = 1200;   // ms of history
 
+/**
+ * The frame time the derived velocity is divided by.
+ *
+ * Deliberately a fixed 1/60 rather than the real elapsed time. Positions here
+ * come from interpolating a 15 Hz stream at a fixed delay, so the distance
+ * moved between two calls is a function of the stream, not of how fast this
+ * machine happens to be rendering. Dividing by a real dt would make a player
+ * on a 144 Hz screen read as moving more than twice as fast as the same player
+ * on a 60 Hz one, and the ghost's hearing is driven off this number.
+ */
+const VEL_STEP = 1 / 60;
+
 export const PLAYER_COLORS = [
   0xffb066, 0x7fd6ff, 0x9fffc8, 0xff8fa8, 0xd0a8ff, 0xffe58f,
 ];
@@ -116,7 +128,7 @@ export class RemotePlayer {
 
     // Derived velocity: the ghost's hearing check needs it on the host, and it
     // is cheaper to infer than to put another field in every snapshot.
-    this.vel.set((this.pos.x - prevX) / dt, 0, (this.pos.z - prevZ) / dt);
+    this.vel.set((this.pos.x - prevX) / VEL_STEP, 0, (this.pos.z - prevZ) / VEL_STEP);
 
     this.crouching = b.crouching;
     // Someone in a closet is inside it, not standing in front of it.

@@ -23,7 +23,9 @@ import { CharacterAnimator } from './animation.js';
 // to work out how wide the frame is at the figure's depth.
 const CAM_Z = 3.15;
 
-const ROOM_W = 7.0;
+// Wide enough that a figure pushed to one side on a broad display still has
+// wall behind it rather than the edge of the box. offsetX clamps to 2.6.
+const ROOM_W = 9.0;
 const ROOM_D = 6.5;
 const ROOM_H = 3.2;
 const T = 0.25;
@@ -91,8 +93,9 @@ export class CharacterRoom {
     this.bulb.position.copy(this.lamp.position);
     this.scene.add(this.bulb);
 
-    // Dust, for the same reason the menu has it.
-    const N = 220;
+    // Dust, for the same reason the menu has it. Scaled with the room so a
+    // wider box does not read as a thinner haze.
+    const N = 280;
     const pos = new Float32Array(N * 3);
     this.seeds = new Float32Array(N);
     for (let i = 0; i < N; i++) {
@@ -184,12 +187,15 @@ export class CharacterRoom {
     this.figure.position.set(this.offsetX, 0, 0);
 
     // A slow drift, so a still screen is never quite still.
-    this.camera.position.set(
-      this.offsetX * 0.45 + Math.sin(t * 0.12) * 0.16,
-      1.42 + Math.sin(t * 0.17) * 0.05,
-      CAM_Z,
-    );
-    this.camera.lookAt(this.offsetX, 1.02, 0);
+    //
+    // The camera looks straight down its own axis, NOT at the figure. Aiming it
+    // at this.offsetX put the figure on the optical axis, which projects to the
+    // horizontal centre of the frame whatever the offset is — so offsetX moved
+    // the figure through the room and the camera with it, and the figure never
+    // budged on screen. Everything resize() computes was being cancelled here.
+    const camX = this.offsetX * 0.45 + Math.sin(t * 0.12) * 0.16;
+    this.camera.position.set(camX, 1.42 + Math.sin(t * 0.17) * 0.05, CAM_Z);
+    this.camera.lookAt(camX, 1.02, 0);
 
     const flicker = 0.9 + 0.1 * Math.sin(t * 2.1) * Math.sin(t * 5.3);
     this.lamp.intensity = 16 * flicker;
@@ -208,7 +214,20 @@ export class CharacterRoom {
     if (this._bound?.has(el)) return;
     (this._bound ??= new Set()).add(el);
 
-    const isBackdrop = (e) => e.target === el;
+    /**
+     * Whether a press should turn the figure.
+     *
+     * This used to be `e.target === el`, which meant only the bare screen
+     * element counted — and the pane the figure stands in front of is a child
+     * that covers most of that half of the window. So the figure was turnable
+     * in the strips of background around the pane and nowhere near the figure
+     * itself, which is exactly where anybody would try. Panes opted in with
+     * data-drag-room are backdrop too; controls never are.
+     */
+    const isBackdrop = (e) => {
+      if (e.target.closest('button, input, label, a, select, textarea, .card, .char-chip')) return false;
+      return e.target === el || !!e.target.closest('[data-drag-room]');
+    };
     el.addEventListener('pointerdown', (e) => {
       if (!isBackdrop(e)) return;      // never steal a click from the list
       this.dragging = true;

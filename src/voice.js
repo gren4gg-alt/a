@@ -27,6 +27,10 @@ export class Voice {
     this.denied = false;
     /** Peers we could not establish audio with. Voice only; nothing else. */
     this.failed = new Set();
+    /** peerId -> { n, at }: retry count and last attempt, for the backoff. */
+    this.attempts = new Map();
+    /** Elements blocked by autoplay policy, replayed on the next gesture. */
+    this._blocked = new Set();
     this.peers = new Map();       // peerId -> { call, panner, gain, el, source }
     this.onStatus = null;
 
@@ -109,7 +113,7 @@ export class Voice {
 
   setInputGain(g) {
     this._pendingGain = g;
-    if (this.inputGain) {
+    if (this.inputGain && this.ctx) {
       this.inputGain.gain.setTargetAtTime(g, this.ctx.currentTime, 0.05);
     }
   }
@@ -140,22 +144,65 @@ export class Voice {
     this._applyTracks();
   }
 
-  /** Ring everyone already in the room. Called once we know the roster. */
+  /**
+   * Ring everyone in the room we are not already talking to.
+   *
+   * SAFE TO CALL REPEATEDLY, and it is meant to be — see reconcile(). That is
+   * the fix for voice working for some pairs and not others.
+   *
+   * The old version ran once per roster change, and combined with the
+   * lexicographic tiebreak below that left a hole big enough to drive a bug
+   * through: only the peer with the SMALLER id places the call, so if that
+   * peer had not switched their microphone on yet, the call was never placed
+   * — and nothing ever went back to place it later. Turn your mic on second
+   * and, depending on which random id PeerJS handed you, you either worked or
+   * you were silent for the whole run with no way to tell which.
+   */
   callAll(peer, ids) {
     if (!this.enabled || !peer) return;
+    const now = Date.now();
     for (const id of ids) {
       if (id === peer.id || this.peers.has(id)) continue;
       // Lexicographic tiebreak: only one side places the call, or we would end
       // up with two audio paths per pair and everyone doubled.
       if (peer.id > id) continue;
+
+      // Back off on a pair that keeps failing, so a genuinely unreachable peer
+      // does not mean a new PeerConnection every few seconds forever.
+      const attempt = this.attempts.get(id) ?? { n: 0, at: 0 };
+      const wait = Math.min(30000, 2000 * (2 ** attempt.n));
+      if (now - attempt.at < wait) continue;
+      this.attempts.set(id, { n: attempt.n + 1, at: now });
+
       const call = peer.call(id, this.outgoing ?? this.stream);
       if (call) this._attach(id, call);
     }
   }
 
+  /**
+   * Try again for anybody in the room we still cannot hear.
+   *
+   * Called on a timer rather than only when the roster changes, because the
+   * things that break a pair — one side enabling their microphone later, a
+   * candidate gathering failure, a peer connection that dropped mid-run — do
+   * not change the roster at all.
+   */
+  reconcile(peer, ids) {
+    if (!this.enabled || !peer) return;
+    this.callAll(peer, ids);
+  }
+
   /** Answer an incoming call. */
   accept(call) {
-    if (!this.enabled) { call.close(); return; }
+    if (!this.enabled) {
+      // Nothing to answer with yet. Closing is right — but the caller has to
+      // come back later, which is what reconcile() is for on their side.
+      try { call.close(); } catch { /* already gone */ }
+      return;
+    }
+    // Whoever called us got through, so clear their backoff: if we later have
+    // to call them, we should not start halfway up a retry ladder.
+    this.attempts.delete(call.peer);
     call.answer(this.outgoing ?? this.stream);
     this._attach(call.peer, call);
   }
@@ -197,7 +244,13 @@ export class Voice {
     const el = new window.Audio();
     el.srcObject = remote;
     el.muted = true;
-    el.play().catch(() => { /* autoplay policy; retried on next gesture */ });
+    el.play().catch(() => {
+      // Autoplay policy. The comment here used to say "retried on next
+      // gesture" and nothing retried, so a tab that had not been clicked yet
+      // when somebody joined lost that voice permanently. resumeBlocked() is
+      // the retry, and main.js calls it on the first real interaction.
+      this._blocked.add(el);
+    });
 
     const source = ctx.createMediaStreamSource(remote);
     const panner = ctx.createPanner();
@@ -214,10 +267,21 @@ export class Voice {
     this.peers.set(peerId, { call, panner, gain, el, source });
   }
 
+  /**
+   * Play anything the autoplay policy refused. Cheap and idempotent; call it
+   * from any user gesture.
+   */
+  resumeBlocked() {
+    this.audio.resume();
+    for (const el of [...this._blocked]) {
+      el.play().then(() => this._blocked.delete(el)).catch(() => { /* still blocked */ });
+    }
+  }
+
   /** Move a voice to where that player's avatar is standing. */
   setPosition(peerId, x, y, z) {
     const p = this.peers.get(peerId);
-    if (!p) return;
+    if (!p || !this.ctx) return;
     const t = this.ctx.currentTime;
     if (p.panner.positionX) {
       p.panner.positionX.setTargetAtTime(x, t, 0.03);
@@ -259,7 +323,7 @@ export class Voice {
   /** Downed players speak more quietly. Small touch, big effect. */
   setVolume(peerId, v) {
     const p = this.peers.get(peerId);
-    if (p) p.gain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.15);
+    if (p && this.ctx) p.gain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.15);
   }
 
   /** How many people you can hear, and how many you cannot. */
@@ -267,10 +331,18 @@ export class Voice {
     return { connected: this.peers.size, failed: this.failed.size };
   }
 
+  /** Forget a peer entirely — they left the room, not just the call. */
+  forget(peerId) {
+    this.drop(peerId);
+    this.attempts.delete(peerId);
+    this.failed.delete(peerId);
+  }
+
   drop(peerId) {
     this.failed.delete(peerId);
     const p = this.peers.get(peerId);
     if (!p) return;
+    this._blocked.delete(p.el);
     try { p.source.disconnect(); p.panner.disconnect(); p.gain.disconnect(); } catch { /* already torn down */ }
     try { p.el.srcObject = null; } catch { /* ignore */ }
     try { p.call.close(); } catch { /* ignore */ }
@@ -279,7 +351,16 @@ export class Voice {
 
   shutdown() {
     for (const id of [...this.peers.keys()]) this.drop(id);
+    this.attempts.clear();
+    this.failed.clear();
+    this._blocked.clear();
     if (this.stream) for (const t of this.stream.getTracks()) t.stop();
+    // The nodes built in _buildInputChain outlive the stream otherwise, and a
+    // second enable() stacks another chain onto the same context.
+    try { this.inputGain?.disconnect(); this.analyser?.disconnect(); } catch { /* already down */ }
+    this.inputGain = null;
+    this.analyser = null;
+    this.outgoing = null;
     this.stream = null;
     this.enabled = false;
   }

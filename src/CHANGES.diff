@@ -1,211 +1,41 @@
-# New file: src/animation.js
-# Changed: src/models.js src/assets.js src/remote.js src/charroom.js src/main.js
+# src/: assets.js models.js animation.js voice.js net.js main.js
+# root: index.html
 
---- /mnt/project/models.js	2026-09-06 08:32:57.914543186 +0000
-+++ models.js	2026-09-06 09:10:16.193852470 +0000
-@@ -1,7 +1,11 @@
- import * as THREE from 'three';
- import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
- import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
--import { MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS, PROP_SIZE } from './assets.js';
-+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
-+import {
-+  MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS, PROP_SIZE,
-+  ANIMATION_ASSETS, USE_ASSET_ANIMATIONS,
-+} from './assets.js';
- 
- // ---------------------------------------------------------------------------
- // Models.
-@@ -67,13 +71,37 @@
-  *
-  * @returns {{root: THREE.Group, size: THREE.Vector3}} size is post-fit, in metres
-  */
-+/**
-+ * Bounds of a model, correct for rigged ones too.
-+ *
-+ * A SkinnedMesh is not where its geometry says it is. The vertices in the
-+ * buffer are in bind space and the skeleton is what puts them somewhere, so
-+ * measuring the raw geometry gives a box in the wrong place and often the
-+ * wrong size. three knows how to do this properly — SkinnedMesh has its own
-+ * computeBoundingBox that walks every vertex through applyBoneTransform — but
-+ * it needs the bone world matrices to be current, and straight out of the
-+ * loader they are not. Without the two lines below, a Mixamo character
-+ * measures against a box that has nothing to do with the body, which is why
-+ * one came out standing several metres to the side of where it was put and
-+ * swung around the room instead of turning on the spot.
-+ */
-+function measure(object) {
-+  object.updateMatrixWorld(true);
-+  object.traverse((o) => {
-+    if (!o.isSkinnedMesh) return;
-+    o.skeleton?.update?.();
-+    o.boundingBox = null;      // cached; must be dropped or the second pass is stale
-+  });
-+  return new THREE.Box3().setFromObject(object);
-+}
-+
- function fit(object, targetHeight) {
--  const box = new THREE.Box3().setFromObject(object);
-+  const box = measure(object);
-   const size = new THREE.Vector3();
-   box.getSize(size);
-   if (size.y > 1e-4 && targetHeight) {
-     object.scale.multiplyScalar(targetHeight / size.y);
--    box.setFromObject(object);
-+    box.copy(measure(object));
-     box.getSize(size);
-   }
-   const centre = new THREE.Vector3();
-@@ -116,10 +144,30 @@
-  * @returns {THREE.Object3D|null} a fresh clone, or null if the slot has no
-  *   model and the caller should build its primitive instead.
-  */
-+/**
-+ * Clone a cached model.
-+ *
-+ * Object3D.clone() is wrong for anything rigged, and wrong in a way that looks
-+ * like the model simply failed to load. It copies the SkinnedMesh but leaves
-+ * the copy's skeleton POINTING AT THE ORIGINAL'S BONES — so every clone
-+ * deforms to whatever pose that first skeleton happens to be in, wherever it
-+ * happens to be. In practice: the character room builds one, its bones live in
-+ * the character room's scene, and every teammate cloned afterwards has their
-+ * vertices dragged off to that skeleton's coordinates. They are not invisible,
-+ * they are somewhere else, which is why all you could see was the marker bead
-+ * that had been positioned honestly.
-+ *
-+ * SkeletonUtils.clone rebuilds the bone hierarchy and rebinds to it. It costs
-+ * more than a plain clone, so it is only used where it is needed.
-+ */
-+function copyOf(entry) {
-+  return entry.skinned ? cloneSkinned(entry.root) : entry.root.clone(true);
-+}
-+
- export function instance(slot) {
-   const entry = cache.get(slot);
-   if (!entry) return null;
--  const copy = entry.root.clone(true);
-+  const copy = copyOf(entry);
-   copy.animations = entry.animations;
-   return pool(copy);
- }
-@@ -154,7 +202,7 @@
- export function instanceScaled(slot, height) {
-   const entry = cache.get(slot);
-   if (!entry) return null;
--  const copy = entry.root.clone(true);
-+  const copy = copyOf(entry);
-   if (entry.size.y > 1e-4 && height) copy.scale.setScalar(height / entry.size.y);
-   return pool(copy);
- }
-@@ -232,13 +280,83 @@
-   const s = entry.size;
-   if (s.x < 1e-4 || s.y < 1e-4 || s.z < 1e-4) return null;
-   const k = Math.min(w / s.x, h / s.y, d / s.z);
--  const copy = entry.root.clone(true);
-+  const copy = copyOf(entry);
-   copy.scale.setScalar(k);
-   return { object: pool(copy), w: s.x * k, h: s.y * k, d: s.z * k };
- }
- 
- export function animationsFor(slot) { return cache.get(slot)?.animations ?? []; }
- 
-+// ---------------------------------------------------------------------------
-+// Animation clips.
-+//
-+// Loaded from their own files rather than out of the character models, so one
-+// walk.glb animates the whole cast. See the note in assets.js: every Mixamo
-+// rig shares its bone names, which is what makes that work.
-+//
-+// Only the raw clip is stored here plus the hip height of the body it was
-+// downloaded on. Fitting it to a particular character is animation.js's job
-+// and happens per instance, because the answer differs per character.
-+// ---------------------------------------------------------------------------
-+
-+const clips = new Map();
-+
-+/** @returns {{clip: THREE.AnimationClip, hipsY: number}|null} */
-+export function animationSource(state) {
-+  return clips.get(state) ?? null;
-+}
-+
-+export function animationStates() {
-+  return [...clips.keys()];
-+}
-+
-+/**
-+ * Rest height of the hips in a loaded animation file, which is the yardstick
-+ * the retargeter scales hip motion against.
-+ *
-+ * Duplicated from animation.js rather than imported, to keep models.js free of
-+ * a dependency on it — this file is loaded by things that never animate.
-+ */
-+function sourceHipsHeight(scene) {
-+  let bone = null;
-+  scene.updateMatrixWorld(true);
-+  scene.traverse((o) => {
-+    if (bone) return;
-+    const n = String(o.name).toLowerCase().replace(/[^a-z0-9]/g, '');
-+    if (n.replace(/mixamorig\d*/g, '') === 'hips') bone = o;
-+  });
-+  if (!bone) return 0;
-+  return new THREE.Vector3().setFromMatrixPosition(bone.matrixWorld).y;
-+}
-+
-+/** Resolves once every configured animation has either loaded or failed. */
-+export async function loadAnimations() {
-+  if (!USE_ASSET_ANIMATIONS) return { loaded: [], missing: Object.keys(ANIMATION_ASSETS) };
-+  const entries = Object.entries(ANIMATION_ASSETS).filter(([, url]) => url);
-+  const loaded = [], missing = [];
-+
-+  await Promise.all(entries.map(async ([state, url]) => {
-+    try {
-+      const gltf = await loadOne(url);
-+      // A Mixamo export carries exactly one clip, usually called
-+      // "mixamo.com". Anything with several is somebody's own combined file,
-+      // and the first is still the reasonable guess.
-+      const clip = gltf.animations?.[0];
-+      if (!clip) throw new Error('no clip');
-+      const scene = gltf.scene ?? gltf.scenes?.[0];
-+      clips.set(state, {
-+        clip,
-+        hipsY: scene ? sourceHipsHeight(scene) : 0,
-+      });
-+      loaded.push(state);
-+    } catch {
-+      missing.push(state);
-+    }
-+  }));
-+
-+  return { loaded, missing };
-+}
-+
- /** Resolves once every configured model has either loaded or failed. */
- export async function loadModels(onProgress) {
-   if (!USE_ASSET_MODELS) return { loaded: [], missing: Object.keys(MODEL_ASSETS) };
-@@ -255,10 +373,18 @@
-       if (stripped) {
-         console.info(`[models] ${slot}: dropped ${stripped} label object(s) from ${spec.url}`);
-       }
--      scene.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
-+      let skinned = false;
-+      scene.traverse((o) => {
-+        if (o.isMesh) o.frustumCulled = false;
-+        // A rigged mesh must never be culled by its own bounds either: those
-+        // bounds are the bind pose, and an animated arm reaching outside them
-+        // makes the whole body vanish at the edge of the screen.
-+        if (o.isSkinnedMesh) { o.frustumCulled = false; skinned = true; }
-+      });
-       const fitted = fit(scene, spec.height);
-       cache.set(slot, {
--        root: fitted.root, size: fitted.size, animations: gltf.animations ?? [],
-+        root: fitted.root, size: fitted.size, skinned,
-+        animations: gltf.animations ?? [],
-       });
-       loaded.push(slot);
-     } catch {
 --- /mnt/project/assets.js	2026-09-06 08:32:56.142543081 +0000
-+++ assets.js	2026-09-06 09:07:28.674458222 +0000
-@@ -144,6 +144,85 @@
++++ assets.js	2026-09-06 12:36:41.875005599 +0000
+@@ -131,6 +131,31 @@
+  * These are yours to play with. Nothing else in the game reads them, and
+  * getting one wrong makes that model the wrong size and nothing more.
+  */
++/**
++ * Half turns and quarter turns, in DEGREES, applied when a model is loaded.
++ *
++ * Blender is Z-up and its glTF exporter maps (x, y, z) to (x, z, -y), so
++ * Blender +Y leaves as glTF -Z. A Mixamo character imported into Blender faces
++ * -Y, which comes out as +Z — and three's forward is -Z. So every Mixamo
++ * character arrives back to front, which is why teammates moonwalk.
++ *
++ * Fixing it at export is tidier (see face_forward() in the bake script) and
++ * this is here for everything you would rather not re-export. Once a model is
++ * fixed at the source, set its entry to 0 or the two corrections cancel out
++ * and it is backwards again.
++ */
++export const MODEL_YAW = {
++  player:             180,
++  player_lamplighter: 180,
++  player_runner:      180,
++  player_nurse:       180,
++  player_scavenger:   180,
++  player_quiet:       180,
++  player_warden:      180,
++  player_lookout:     180,
++  player_terminator:  180,
++};
++
+ export const PROP_SIZE = {
+   chair:     1.0,
+   table:     1.0,
+@@ -144,6 +169,85 @@
  };
  
  // ---------------------------------------------------------------------------
@@ -291,210 +121,486 @@
  // Colour for models that arrive with none.
  //
  // glTF carries a base colour and image textures, and nothing else. A material
---- /mnt/project/remote.js	2026-09-06 08:32:57.994543191 +0000
-+++ remote.js	2026-09-06 09:08:41.301152888 +0000
-@@ -1,6 +1,7 @@
+--- /mnt/project/models.js	2026-09-06 08:32:57.914543186 +0000
++++ models.js	2026-09-06 12:36:53.773343379 +0000
+@@ -1,7 +1,11 @@
  import * as THREE from 'three';
- import { createGlowMaterial } from './material.js';
- import { characterModel } from './models.js';
-+import { CharacterAnimator, stateFor } from './animation.js';
+ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+-import { MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS, PROP_SIZE } from './assets.js';
++import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
++import {
++  MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS, PROP_SIZE,
++  ANIMATION_ASSETS, USE_ASSET_ANIMATIONS, MODEL_YAW,
++} from './assets.js';
  
  // ---------------------------------------------------------------------------
- // Remote players.
-@@ -62,6 +63,11 @@
-     this.mesh.renderOrder = 1;
-     scene.add(this.mesh);
- 
-+    // Only a real model can be animated. The capsule fallback keeps the squash
-+    // and the tip-over below, which is why those are still here.
-+    this.animator = this.usesModel ? new CharacterAnimator(model) : null;
-+    if (!this.animator?.usable) this.animator = null;
+ // Models.
+@@ -67,13 +71,40 @@
+  *
+  * @returns {{root: THREE.Group, size: THREE.Vector3}} size is post-fit, in metres
+  */
+-function fit(object, targetHeight) {
+-  const box = new THREE.Box3().setFromObject(object);
++/**
++ * Bounds of a model, correct for rigged ones too.
++ *
++ * A SkinnedMesh is not where its geometry says it is. The vertices in the
++ * buffer are in bind space and the skeleton is what puts them somewhere, so
++ * measuring the raw geometry gives a box in the wrong place and often the
++ * wrong size. three knows how to do this properly — SkinnedMesh has its own
++ * computeBoundingBox that walks every vertex through applyBoneTransform — but
++ * it needs the bone world matrices to be current, and straight out of the
++ * loader they are not. Without the two lines below, a Mixamo character
++ * measures against a box that has nothing to do with the body, which is why
++ * one came out standing several metres to the side of where it was put and
++ * swung around the room instead of turning on the spot.
++ */
++function measure(object) {
++  object.updateMatrixWorld(true);
++  object.traverse((o) => {
++    if (!o.isSkinnedMesh) return;
++    o.skeleton?.update?.();
++    o.boundingBox = null;      // cached; must be dropped or the second pass is stale
++  });
++  return new THREE.Box3().setFromObject(object);
++}
 +
-     // A small marker that stays visible through walls, so you can find each
-     // other in a maze without shouting coordinates.
-     const beadGeo = new THREE.SphereGeometry(0.09, 8, 6);
-@@ -78,7 +84,11 @@
-     while (this.buffer.length > 2 && this.buffer[0].t < cutoff) this.buffer.shift();
++function fit(object, targetHeight, yawDegrees = 0) {
++  // Before anything is measured, so the recentring below is done on the model
++  // as it will actually stand rather than as it was exported.
++  if (yawDegrees) object.rotation.y = THREE.MathUtils.degToRad(yawDegrees);
++  const box = measure(object);
+   const size = new THREE.Vector3();
+   box.getSize(size);
+   if (size.y > 1e-4 && targetHeight) {
+     object.scale.multiplyScalar(targetHeight / size.y);
+-    box.setFromObject(object);
++    box.copy(measure(object));
+     box.getSize(size);
+   }
+   const centre = new THREE.Vector3();
+@@ -116,10 +147,30 @@
+  * @returns {THREE.Object3D|null} a fresh clone, or null if the slot has no
+  *   model and the caller should build its primitive instead.
+  */
++/**
++ * Clone a cached model.
++ *
++ * Object3D.clone() is wrong for anything rigged, and wrong in a way that looks
++ * like the model simply failed to load. It copies the SkinnedMesh but leaves
++ * the copy's skeleton POINTING AT THE ORIGINAL'S BONES — so every clone
++ * deforms to whatever pose that first skeleton happens to be in, wherever it
++ * happens to be. In practice: the character room builds one, its bones live in
++ * the character room's scene, and every teammate cloned afterwards has their
++ * vertices dragged off to that skeleton's coordinates. They are not invisible,
++ * they are somewhere else, which is why all you could see was the marker bead
++ * that had been positioned honestly.
++ *
++ * SkeletonUtils.clone rebuilds the bone hierarchy and rebinds to it. It costs
++ * more than a plain clone, so it is only used where it is needed.
++ */
++function copyOf(entry) {
++  return entry.skinned ? cloneSkinned(entry.root) : entry.root.clone(true);
++}
++
+ export function instance(slot) {
+   const entry = cache.get(slot);
+   if (!entry) return null;
+-  const copy = entry.root.clone(true);
++  const copy = copyOf(entry);
+   copy.animations = entry.animations;
+   return pool(copy);
+ }
+@@ -154,7 +205,7 @@
+ export function instanceScaled(slot, height) {
+   const entry = cache.get(slot);
+   if (!entry) return null;
+-  const copy = entry.root.clone(true);
++  const copy = copyOf(entry);
+   if (entry.size.y > 1e-4 && height) copy.scale.setScalar(height / entry.size.y);
+   return pool(copy);
+ }
+@@ -232,13 +283,90 @@
+   const s = entry.size;
+   if (s.x < 1e-4 || s.y < 1e-4 || s.z < 1e-4) return null;
+   const k = Math.min(w / s.x, h / s.y, d / s.z);
+-  const copy = entry.root.clone(true);
++  const copy = copyOf(entry);
+   copy.scale.setScalar(k);
+   return { object: pool(copy), w: s.x * k, h: s.y * k, d: s.z * k };
+ }
+ 
+ export function animationsFor(slot) { return cache.get(slot)?.animations ?? []; }
+ 
++// ---------------------------------------------------------------------------
++// Animation clips.
++//
++// Loaded from their own files rather than out of the character models, so one
++// walk.glb animates the whole cast. See the note in assets.js: every Mixamo
++// rig shares its bone names, which is what makes that work.
++//
++// Only the raw clip is stored here plus the hip height of the body it was
++// downloaded on. Fitting it to a particular character is animation.js's job
++// and happens per instance, because the answer differs per character.
++// ---------------------------------------------------------------------------
++
++const clips = new Map();
++
++/** @returns {{clip: THREE.AnimationClip, hipsY: number}|null} */
++export function animationSource(state) {
++  return clips.get(state) ?? null;
++}
++
++export function animationStates() {
++  return [...clips.keys()];
++}
++
++/**
++ * Rest height of the hips in a loaded animation file, which is the yardstick
++ * the retargeter scales hip motion against.
++ *
++ * Duplicated from animation.js rather than imported, to keep models.js free of
++ * a dependency on it — this file is loaded by things that never animate.
++ */
++function sourceHips(scene) {
++  let bone = null;
++  scene.updateMatrixWorld(true);
++  scene.traverse((o) => {
++    if (bone) return;
++    const n = String(o.name).toLowerCase().replace(/[^a-z0-9]/g, '');
++    if (n.replace(/mixamorig\d*/g, '') === 'hips') bone = o;
++  });
++  if (!bone) return { worldY: 0, local: null };
++  return {
++    // How high off the floor this body's hips sit, for scaling motion between
++    // bodies of different heights.
++    worldY: new THREE.Vector3().setFromMatrixPosition(bone.matrixWorld).y,
++    // Where the clip's hip track STARTS from. Needed because a Mixamo hip
++    // track is an absolute local position, not an offset — so replaying it on
++    // another rig plants the body wherever the source rig's hips happened to
++    // be, which is what put characters through the floor.
++    local: bone.position.clone(),
++  };
++}
++
++/** Resolves once every configured animation has either loaded or failed. */
++export async function loadAnimations() {
++  if (!USE_ASSET_ANIMATIONS) return { loaded: [], missing: Object.keys(ANIMATION_ASSETS) };
++  const entries = Object.entries(ANIMATION_ASSETS).filter(([, url]) => url);
++  const loaded = [], missing = [];
++
++  await Promise.all(entries.map(async ([state, url]) => {
++    try {
++      const gltf = await loadOne(url);
++      // A Mixamo export carries exactly one clip, usually called
++      // "mixamo.com". Anything with several is somebody's own combined file,
++      // and the first is still the reasonable guess.
++      const clip = gltf.animations?.[0];
++      if (!clip) throw new Error('no clip');
++      const scene = gltf.scene ?? gltf.scenes?.[0];
++      const hips = scene ? sourceHips(scene) : { worldY: 0, local: null };
++      clips.set(state, { clip, hipsY: hips.worldY, hipsLocal: hips.local });
++      loaded.push(state);
++    } catch {
++      missing.push(state);
++    }
++  }));
++
++  return { loaded, missing };
++}
++
+ /** Resolves once every configured model has either loaded or failed. */
+ export async function loadModels(onProgress) {
+   if (!USE_ASSET_MODELS) return { loaded: [], missing: Object.keys(MODEL_ASSETS) };
+@@ -255,10 +383,18 @@
+       if (stripped) {
+         console.info(`[models] ${slot}: dropped ${stripped} label object(s) from ${spec.url}`);
+       }
+-      scene.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
+-      const fitted = fit(scene, spec.height);
++      let skinned = false;
++      scene.traverse((o) => {
++        if (o.isMesh) o.frustumCulled = false;
++        // A rigged mesh must never be culled by its own bounds either: those
++        // bounds are the bind pose, and an animated arm reaching outside them
++        // makes the whole body vanish at the edge of the screen.
++        if (o.isSkinnedMesh) { o.frustumCulled = false; skinned = true; }
++      });
++      const fitted = fit(scene, spec.height, MODEL_YAW[slot] ?? 0);
+       cache.set(slot, {
+-        root: fitted.root, size: fitted.size, animations: gltf.animations ?? [],
++        root: fitted.root, size: fitted.size, skinned,
++        animations: gltf.animations ?? [],
+       });
+       loaded.push(slot);
+     } catch {
+--- /mnt/project/voice.js	2026-09-06 08:32:58.782543238 +0000
++++ voice.js	2026-09-06 12:37:56.545628357 +0000
+@@ -27,6 +27,10 @@
+     this.denied = false;
+     /** Peers we could not establish audio with. Voice only; nothing else. */
+     this.failed = new Set();
++    /** peerId -> { n, at }: retry count and last attempt, for the backoff. */
++    this.attempts = new Map();
++    /** Elements blocked by autoplay policy, replayed on the next gesture. */
++    this._blocked = new Set();
+     this.peers = new Map();       // peerId -> { call, panner, gain, el, source }
+     this.onStatus = null;
+ 
+@@ -109,7 +113,7 @@
+ 
+   setInputGain(g) {
+     this._pendingGain = g;
+-    if (this.inputGain) {
++    if (this.inputGain && this.ctx) {
+       this.inputGain.gain.setTargetAtTime(g, this.ctx.currentTime, 0.05);
+     }
+   }
+@@ -140,22 +144,65 @@
+     this._applyTracks();
    }
  
--  update(now) {
+-  /** Ring everyone already in the room. Called once we know the roster. */
 +  /**
-+   * @param dt seconds since the last frame, for the animation mixer. Zero is
-+   *   safe and simply leaves the pose where it is.
++   * Ring everyone in the room we are not already talking to.
++   *
++   * SAFE TO CALL REPEATEDLY, and it is meant to be — see reconcile(). That is
++   * the fix for voice working for some pairs and not others.
++   *
++   * The old version ran once per roster change, and combined with the
++   * lexicographic tiebreak below that left a hole big enough to drive a bug
++   * through: only the peer with the SMALLER id places the call, so if that
++   * peer had not switched their microphone on yet, the call was never placed
++   * — and nothing ever went back to place it later. Turn your mic on second
++   * and, depending on which random id PeerJS handed you, you either worked or
++   * you were silent for the whole run with no way to tell which.
 +   */
-+  update(now, dt = 0) {
-     const target = now - INTERP_DELAY;
-     const buf = this.buffer;
-     if (!buf.length) return;
-@@ -114,17 +124,35 @@
-     const stowed = !!this.hidingClosetId;
-     this.mesh.visible = !this.dead && !stowed;
-     this.bead.visible = !this.dead && !stowed;
--    // Squash rather than swap geometry: at the distance you ever see another
--    // player in here, the silhouette is all the information that survives.
--    const squash = this.crouching ? 0.52 : 1;
--    this.mesh.scale.set(1, squash, 1);
--    this.mesh.position.set(this.pos.x, this.downed ? -0.55 : 0, this.pos.z);
--    this.mesh.rotation.set(this.downed ? Math.PI / 2.3 : 0, this.yaw, 0);
+   callAll(peer, ids) {
+     if (!this.enabled || !peer) return;
++    const now = Date.now();
+     for (const id of ids) {
+       if (id === peer.id || this.peers.has(id)) continue;
+       // Lexicographic tiebreak: only one side places the call, or we would end
+       // up with two audio paths per pair and everyone doubled.
+       if (peer.id > id) continue;
 +
-+    if (this.animator) {
-+      // The speed comes from the interpolated position, which is the same
-+      // number the ghost's hearing uses — so what you see somebody doing is
-+      // what the house thinks they are doing.
-+      const speed = Math.hypot(this.vel.x, this.vel.z);
-+      this.animator.play(stateFor({
-+        speed, crouching: this.crouching, downed: this.downed,
-+      }), speed);
-+      this.animator.update(dt);
-+      // The clip is doing the crouching and the falling over, so the old
-+      // stand-ins must not fight it.
-+      this.mesh.scale.set(1, 1, 1);
-+      this.mesh.position.set(this.pos.x, 0, this.pos.z);
-+      this.mesh.rotation.set(0, this.yaw, 0);
-+    } else {
-+      // Squash rather than swap geometry: at the distance you ever see another
-+      // player in here, the silhouette is all the information that survives.
-+      const squash = this.crouching ? 0.52 : 1;
-+      this.mesh.scale.set(1, squash, 1);
-+      this.mesh.position.set(this.pos.x, this.downed ? -0.55 : 0, this.pos.z);
-+      this.mesh.rotation.set(this.downed ? Math.PI / 2.3 : 0, this.yaw, 0);
-+    }
-     this.bead.position.set(this.pos.x, this.downed ? 0.35 : (this.crouching ? 1.15 : 2.05), this.pos.z);
-     if (!this.usesModel) this.material.uniforms.uGain.value = this.downed ? 0.35 : 0.9;
++      // Back off on a pair that keeps failing, so a genuinely unreachable peer
++      // does not mean a new PeerConnection every few seconds forever.
++      const attempt = this.attempts.get(id) ?? { n: 0, at: 0 };
++      const wait = Math.min(30000, 2000 * (2 ** attempt.n));
++      if (now - attempt.at < wait) continue;
++      this.attempts.set(id, { n: attempt.n + 1, at: now });
++
+       const call = peer.call(id, this.outgoing ?? this.stream);
+       if (call) this._attach(id, call);
+     }
    }
  
-   dispose(scene) {
-+    this.animator?.dispose();
-     scene.remove(this.mesh);
-     scene.remove(this.bead);
-     this.mesh.geometry?.dispose();
---- /mnt/project/charroom.js	2026-09-06 08:32:56.190543084 +0000
-+++ charroom.js	2026-09-06 09:08:51.591855423 +0000
-@@ -1,6 +1,7 @@
- import * as THREE from 'three';
- import { buildFigure } from './preview.js';
- import { characterModel } from './models.js';
-+import { CharacterAnimator } from './animation.js';
- 
- // ---------------------------------------------------------------------------
- // The character room.
-@@ -18,6 +19,10 @@
- // baked pipeline has nothing to offer at that size.
- // ---------------------------------------------------------------------------
- 
-+// How far back the camera stands. Referenced by resize(), which has to know it
-+// to work out how wide the frame is at the figure's depth.
-+const CAM_Z = 3.15;
-+
- const ROOM_W = 7.0;
- const ROOM_D = 6.5;
- const ROOM_H = 3.2;
-@@ -33,6 +38,7 @@
-     this.dragging = false;
-     this.lastX = 0;
-     this.offsetX = 1.15;
-+    this.animator = null;
- 
-     this.figure = new THREE.Group();
-     this.scene.add(this.figure);
-@@ -105,6 +111,8 @@
-   }
- 
-   show(character) {
-+    this.animator?.dispose();
-+    this.animator = null;
-     this.figure.clear();
-     // Their own model if you supplied one, the generic body if not, and the
-     // built-in silhouette if neither.
-@@ -112,24 +120,64 @@
-     this.figure.add(model ?? buildFigure(character));
-     this.character = character;
- 
-+    // Breathing, in the shop. A body standing in a T-pose reads as a broken
-+    // asset however good it is, and idle is the one clip anybody has on day
-+    // one — so this is the screen where having wired animation shows first.
-+    if (model) {
-+      const animator = new CharacterAnimator(model);
-+      if (animator.usable) {
-+        animator.play('idle');
-+        this.animator = animator;
-+      } else {
-+        animator.dispose();
-+      }
-+    }
-+
-     // Tint the lamp towards the character, so each one owns the room a little.
-     this.lamp.color.setHex(character.color).lerp(new THREE.Color(0xffb066), 0.55);
-     this.bulb.material.color.copy(this.lamp.color);
-   }
- 
-   /**
--   * The list sits on the left on a wide screen, so the figure stands right of
--   * centre. On a narrow one the list is full width, so it goes back to middle.
-+   * Stand the figure where the page has left room for it.
++  /**
++   * Try again for anybody in the room we still cannot hear.
 +   *
-+   * This used to be a flat 1.15 metres right of centre on any screen wider
-+   * than 900px, which was right for exactly one layout. The shop and the
-+   * character select reserve different columns, and at 1800px wide the figure
-+   * ended up standing behind the list on one of them. So rather than a magic
-+   * number: take the element the page has set aside for the preview, work out
-+   * where the middle of it falls on screen, and put the figure there.
-+   *
-+   * @param target the element the figure should stand in front of, or null to
-+   *   fall back to the old centred behaviour on a narrow screen
-    */
--  resize(w, h) {
-+  resize(w, h, target = null) {
-     this.camera.aspect = w / h;
-     this.camera.updateProjectionMatrix();
--    this.offsetX = w > 900 ? 1.15 : 0;
++   * Called on a timer rather than only when the roster changes, because the
++   * things that break a pair — one side enabling their microphone later, a
++   * candidate gathering failure, a peer connection that dropped mid-run — do
++   * not change the roster at all.
++   */
++  reconcile(peer, ids) {
++    if (!this.enabled || !peer) return;
++    this.callAll(peer, ids);
++  }
 +
-+    const rect = target?.getBoundingClientRect?.();
-+    if (!rect || rect.width < 1 || w <= 900) {
-+      this.offsetX = w > 900 ? 1.15 : 0;
+   /** Answer an incoming call. */
+   accept(call) {
+-    if (!this.enabled) { call.close(); return; }
++    if (!this.enabled) {
++      // Nothing to answer with yet. Closing is right — but the caller has to
++      // come back later, which is what reconcile() is for on their side.
++      try { call.close(); } catch { /* already gone */ }
++      return;
++    }
++    // Whoever called us got through, so clear their backoff: if we later have
++    // to call them, we should not start halfway up a retry ladder.
++    this.attempts.delete(call.peer);
+     call.answer(this.outgoing ?? this.stream);
+     this._attach(call.peer, call);
+   }
+@@ -197,7 +244,13 @@
+     const el = new window.Audio();
+     el.srcObject = remote;
+     el.muted = true;
+-    el.play().catch(() => { /* autoplay policy; retried on next gesture */ });
++    el.play().catch(() => {
++      // Autoplay policy. The comment here used to say "retried on next
++      // gesture" and nothing retried, so a tab that had not been clicked yet
++      // when somebody joined lost that voice permanently. resumeBlocked() is
++      // the retry, and main.js calls it on the first real interaction.
++      this._blocked.add(el);
++    });
+ 
+     const source = ctx.createMediaStreamSource(remote);
+     const panner = ctx.createPanner();
+@@ -214,10 +267,21 @@
+     this.peers.set(peerId, { call, panner, gain, el, source });
+   }
+ 
++  /**
++   * Play anything the autoplay policy refused. Cheap and idempotent; call it
++   * from any user gesture.
++   */
++  resumeBlocked() {
++    this.audio.resume();
++    for (const el of [...this._blocked]) {
++      el.play().then(() => this._blocked.delete(el)).catch(() => { /* still blocked */ });
++    }
++  }
++
+   /** Move a voice to where that player's avatar is standing. */
+   setPosition(peerId, x, y, z) {
+     const p = this.peers.get(peerId);
+-    if (!p) return;
++    if (!p || !this.ctx) return;
+     const t = this.ctx.currentTime;
+     if (p.panner.positionX) {
+       p.panner.positionX.setTargetAtTime(x, t, 0.03);
+@@ -259,7 +323,7 @@
+   /** Downed players speak more quietly. Small touch, big effect. */
+   setVolume(peerId, v) {
+     const p = this.peers.get(peerId);
+-    if (p) p.gain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.15);
++    if (p && this.ctx) p.gain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.15);
+   }
+ 
+   /** How many people you can hear, and how many you cannot. */
+@@ -267,10 +331,18 @@
+     return { connected: this.peers.size, failed: this.failed.size };
+   }
+ 
++  /** Forget a peer entirely — they left the room, not just the call. */
++  forget(peerId) {
++    this.drop(peerId);
++    this.attempts.delete(peerId);
++    this.failed.delete(peerId);
++  }
++
+   drop(peerId) {
+     this.failed.delete(peerId);
+     const p = this.peers.get(peerId);
+     if (!p) return;
++    this._blocked.delete(p.el);
+     try { p.source.disconnect(); p.panner.disconnect(); p.gain.disconnect(); } catch { /* already torn down */ }
+     try { p.el.srcObject = null; } catch { /* ignore */ }
+     try { p.call.close(); } catch { /* ignore */ }
+@@ -279,7 +351,16 @@
+ 
+   shutdown() {
+     for (const id of [...this.peers.keys()]) this.drop(id);
++    this.attempts.clear();
++    this.failed.clear();
++    this._blocked.clear();
+     if (this.stream) for (const t of this.stream.getTracks()) t.stop();
++    // The nodes built in _buildInputChain outlive the stream otherwise, and a
++    // second enable() stacks another chain onto the same context.
++    try { this.inputGain?.disconnect(); this.analyser?.disconnect(); } catch { /* already down */ }
++    this.inputGain = null;
++    this.analyser = null;
++    this.outgoing = null;
+     this.stream = null;
+     this.enabled = false;
+   }
+--- /mnt/project/net.js	2026-09-06 08:32:57.990543191 +0000
++++ net.js	2026-09-06 12:38:19.774463579 +0000
+@@ -93,6 +93,8 @@
+     this.open = false;
+     /** Host-side: return a reason string to refuse a connection, or null. */
+     this.gate = null;
++    /** Peers turned away at the door, so their second channel is refused too. */
++    this.refused = new Set();
+   }
+ 
+   on(type, fn) {
+@@ -202,15 +204,37 @@
+     }
+ 
+     const role = conn.metadata?.role ?? 'rel';
++
++    // A refused peer opens TWO channels, and the gate only ever saw the
++    // reliable one. The unreliable one arrived separately, was never gated,
++    // and got an entry in this.conns — which broadcast() iterates. So somebody
++    // turned away at the door carried on receiving every position snapshot for
++    // the rest of the run. Refusals are remembered and both channels are shut.
++    if (this.refused.has(conn.peer)) {
++      try { conn.close(); } catch { /* already gone */ }
 +      return;
 +    }
 +
-+    // Half the world the camera can see at the depth the figure stands at.
-+    const halfH = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2) * CAM_Z;
-+    const halfW = halfH * this.camera.aspect;
+     // Refuse before wiring anything up, so a rejected peer never lands in the
+     // roster or receives a snapshot.
+     if (role === 'rel' && this.gate) {
+       const why = this.gate(conn);
+       if (why) {
+-        conn.on('open', () => {
+-          conn.send({ t: 'no', d: { why } });
+-          setTimeout(() => conn.close(), 400);
+-        });
++        this.refused.add(conn.peer);
++        // Do not remember them forever: a version mismatch is fixed by a
++        // refresh, and a full room empties.
++        setTimeout(() => this.refused.delete(conn.peer), 60000);
++        // Close the sibling channel if it beat us here.
++        const sibling = this.conns.get(conn.peer);
++        if (sibling) {
++          try { sibling.rel?.close(); sibling.unrel?.close(); } catch { /* gone */ }
++          this.conns.delete(conn.peer);
++        }
++        const refuse = () => {
++          try { conn.send({ t: 'no', d: { why } }); } catch { /* gone */ }
++          setTimeout(() => { try { conn.close(); } catch { /* gone */ } }, 400);
++        };
++        conn.open ? refuse() : conn.on('open', refuse);
+         return;
+       }
+     }
+@@ -268,9 +292,16 @@
+     this._hb = setInterval(() => {
+       const now = Date.now();
+       for (const [peerId, entry] of [...this.conns]) {
+-        if (peerId === this.hostId && !this.isHost) continue;
++        const isTheHost = peerId === this.hostId && !this.isHost;
 +
-+    // Where the middle of that column sits, as -1 (left edge) to +1 (right).
-+    const frac = ((rect.left + rect.width / 2) - w / 2) / (w / 2);
-+
-+    // The camera slides with the figure at 0.45 of its offset, so only the
-+    // remaining 0.55 actually moves it across the frame. Dividing that out is
-+    // what makes the figure land on the column rather than short of it.
-+    this.offsetX = THREE.MathUtils.clamp((frac * halfW) / 0.55, -2.6, 2.6);
+         if (now - (entry.lastSeen ?? now) > timeoutMs) {
+-          this._emit('timeout', { id: peerId });
++          // A host that closed their tab is often not reported by PeerJS at
++          // all — the socket simply goes quiet. Previously the host was
++          // skipped entirely here, so a client sat in a house where nothing
++          // moved and never found out why. Now it is the same check as
++          // everyone else, with its own event because the answer is different.
++          if (isTheHost) this._emit('hostlost', { id: peerId });
++          else this._emit('timeout', { id: peerId });
+           this._dropped(peerId);
+           continue;
+         }
+@@ -299,6 +330,10 @@
+   _dropped(peerId) {
+     if (!this.conns.has(peerId)) return;
+     this.conns.delete(peerId);
++    // On a client the host is not just another peer leaving; it is the end of
++    // the room. Both events fire, so anything that only cares about "somebody
++    // went" still works, and the host case can be handled properly on top.
++    if (!this.isHost && peerId === this.hostId) this._emit('hostlost', { id: peerId });
+     this._emit('left', { id: peerId });
    }
  
-   update(dt) {
-     this.time += dt;
-     const t = this.time;
-+    this.animator?.update(dt);
- 
-     if (this.spin && !this.dragging) this.yaw += dt * 0.18;
-     this.figure.rotation.y = this.yaw;
-@@ -139,7 +187,7 @@
-     this.camera.position.set(
-       this.offsetX * 0.45 + Math.sin(t * 0.12) * 0.16,
-       1.42 + Math.sin(t * 0.17) * 0.05,
--      3.15,
-+      CAM_Z,
-     );
-     this.camera.lookAt(this.offsetX, 1.02, 0);
- 
-@@ -180,6 +228,8 @@
-   }
- 
-   dispose() {
-+    this.animator?.dispose();
-+    this.animator = null;
-     this.scene.traverse((o) => {
-       if (o.isMesh || o.isPoints) { o.geometry?.dispose(); o.material?.dispose(); }
-     });
+@@ -336,6 +371,7 @@
+     clearTimeout(this._handshake);
+     try { this.peer?.destroy(); } catch { /* already gone */ }
+     this.conns.clear();
++    this.refused.clear();
+     this.handlers.clear();
+     this.peer = null;
+     this.open = false;
 --- /mnt/project/main.js	2026-09-06 08:32:57.550543164 +0000
-+++ main.js	2026-09-06 09:10:00.263598381 +0000
++++ main.js	2026-09-06 12:41:04.952017821 +0000
 @@ -16,7 +16,7 @@
  import { loadSurfaceTextures } from './textures.js';
  import { loadModels } from './models.js';
@@ -504,6 +610,15 @@
  import { MODEL_TINT } from './assets.js';
  import { startMinigame, GAME_NAMES } from './minigames.js';
  import { ceilingColliders, roomVariant } from './build.js';
+@@ -61,7 +61,7 @@
+   ingameMenu: $('ingame-menu'),
+   use: $('use'), useLabel: $('use-label'), useKey: $('use-key'),
+   hiding: $('hiding'), hidingKey: $('hiding-key'), hidingVerb: $('hiding-verb'),
+-  ghostNear: $('ghost-near'),
++  ghostNear: $('ghost-near'), toast: $('toast'),
+   door: $('door-status'), doorCount: $('door-count'),
+   tv: $('tv'), tvBody: $('tv-body'),
+   board: $('board'), boardBody: $('board-body'), boardRoom: $('board-room'),
 @@ -144,7 +144,10 @@
    if (crashed) return;
  
@@ -548,3 +663,335 @@
    if (!isHost()) for (const g of run.ghosts) g.updateVisualsOnly(dt, run.grid, run.time);
    if (!run.over && run.begun) simulate(dt);
    if (isNet()) network(dt);
+@@ -2065,18 +2077,22 @@
+ 
+     // Checked again: the gate ran when the connection opened, and the roster
+     // can have filled between then and now.
+-    if (roomLocked || session.roster.length >= 6) { net.send(id, MSG.DENY, { why: 'The room closed.' }, true); return; }
++    // kick(), not send(DENY): send leaves them connected, and a connected peer
++    // is in net.conns, and broadcast() iterates net.conns. Somebody turned
++    // away for arriving sixth was still fed every snapshot of the run.
++    if (roomLocked || session.roster.length >= 6) { net.kick(id, 'The room closed.'); return; }
+     if (!session.roster.some((p) => p.id === id)) {
+       session.roster.push({ id, sid, name: cleanName(name), ready: false, char: DEFAULT_CHARACTER });
+     }
+     broadcastLobby();
+-    voice.callAll(net.peer, [...net.conns.keys()]);
++    voice.callAll(net.peer, voicePeerIds());
+   });
+ 
+   net.on('timeout', ({ id }) => {
+     if (!isHost()) return;
+     session.roster = session.roster.filter((p) => p.id !== id);
+     broadcastLobby();
++    hostRecheckLoaded();
+   });
+ 
+   net.on(MSG.DENY, fromHost((d) => {
+@@ -2094,10 +2110,16 @@
+   }));
+ 
+   net.on('left', ({ id }) => {
+-    voice.drop(id);
++    // forget, not drop: drop() closes the call but leaves the retry backoff in
++    // place, so somebody who left and rejoined started halfway up the ladder.
++    voice.forget(id);
+     if (isHost()) {
+       session.roster = session.roster.filter((p) => p.id !== id);
+       broadcastLobby();
++      // The person everyone was waiting on may be the person who just left.
++      // Without this the house stays frozen until the load watchdog fires,
++      // which is the better part of a minute of nobody being able to move.
++      hostRecheckLoaded();
+     }
+     if (run) {
+       const r = run.remotes.get(id);
+@@ -2124,7 +2146,7 @@
+     const me = meInRoster();
+     if (me) { session.character = me.char ?? session.character; session.ready = !!me.ready; }
+     if (currentScreen === 'select' || currentScreen === 'multiplayer') renderSelect();
+-    voice.callAll(net.peer, roster.map((p) => p.id).filter((id) => id !== net.id));
++    voice.callAll(net.peer, voicePeerIds());
+   }));
+ 
+   net.on(MSG.CHAR, fromClient(({ char, ready }, from) => {
+@@ -2297,24 +2319,137 @@
+     // The channel opened but the host never replied: their tab is gone and the
+     // signalling server has not noticed yet. Without this the player sits on a
+     // connected-but-silent screen indefinitely.
+-    voice.shutdown();
+-    session.net?.destroy();
+-    session.net = null;
+-    session.mode = 'solo';
+-    session.roster = [];
+-    show('multiplayer');
+-    showMenuError('That room is not answering. The host has probably closed it.');
++    roomClosed('That room is not answering. The host has probably closed it.');
++  });
++
++  // The host's tab closed, or their connection died. Two very different
++  // situations depending on whether the house had been entered yet.
++  net.on('hostlost', () => {
++    if (isHost() || !isNet()) return;   // already handled, or never applied
++    if (run && !run.over) continueAlone();
++    else roomClosed('The host closed the room.');
+   });
+ 
+   net.on('call', (call) => voice.accept(call));
++
++  // Keep trying, on a timer, for anybody in the room we still cannot hear.
++  //
++  // Every previous attempt to connect a voice pair happened on a roster
++  // change, and none of the things that break a pair change the roster: the
++  // other side switching their microphone on later, ICE failing once, a peer
++  // connection dropping mid-run. This is the loop that makes voice eventually
++  // work instead of working or not depending on join order.
++  clearInterval(voiceRetry);
++  voiceRetry = setInterval(() => {
++    if (!session.net?.peer || !voice.enabled) return;
++    voice.reconcile(session.net.peer, voicePeerIds());
++  }, 4000);
+   net.on('error', (err) => showMenuError(err?.message ?? 'Connection lost.'));
+ }
+ 
++/**
++ * The host has gone and there is still a house to get out of.
++ *
++ * The alternative was to end everyone's run because one person closed a tab,
++ * which is a miserable way to lose twenty minutes. The star topology means
++ * there is no room left to be in — every other player was reachable only
++ * through the host — but the house itself is entirely reproducible locally:
++ * the level was generated from a shared seed and already exists in memory, and
++ * the ghost logic is the same code on every machine, just gated behind
++ * isHost(). Dropping to solo hands that gate the key.
++ *
++ * The ghosts carry on from wherever the last snapshot left them rather than
++ * resetting, so the moment of handover is not a moment of safety.
++ */
++function continueAlone() {
++  const wasClient = session.mode === 'client';
++  clearInterval(voiceRetry);
++  voiceRetry = null;
++  voice.shutdown();
++  try { session.net?.destroy(); } catch { /* already down */ }
++  session.net = null;
++  session.mode = 'solo';
++  roomLocked = false;
++
++  // Everyone else was only ever reachable through the host, so they are gone
++  // whether or not their own tab is still open.
++  if (run) {
++    for (const r of run.remotes.values()) r.dispose(run.scene);
++    run.remotes.clear();
++    run.downTimers?.clear();
++    run.vote = null;
++    el.vote.classList.add('hidden');
++    // isHost() is now true, so the simulation this client has been watching
++    // becomes the simulation it runs. It must not also still be paused waiting
++    // for a BEGIN that will never arrive.
++    run.begun = true;
++  }
++
++  // rosterIndex() is used for colours and for the escape check; a roster with
++  // nobody in it makes both of those quietly wrong.
++  const me = session.roster.find((p) => p.id === session.localId);
++  session.roster = [{
++    id: session.localId,
++    name: me?.name ?? session.name,
++    char: me?.char ?? session.character,
++    ready: true, loaded: true,
++  }];
++
++  if (wasClient) toast('Everyone else is gone. Finish it on your own.');
++}
++
++/**
++ * A line across the middle of the screen that fades on its own.
++ *
++ * For things the player has to be told mid-run and cannot act on — the host
++ * leaving being the one that prompted it. Deliberately not a dialog: stopping
++ * a horror game to make somebody click OK is worse than the news.
++ */
++let toastTimer = null;
++function toast(message, seconds = 5) {
++  el.toast.textContent = message;
++  el.toast.classList.remove('hidden');
++  clearTimeout(toastTimer);
++  toastTimer = setTimeout(() => el.toast.classList.add('hidden'), seconds * 1000);
++}
++
++/**
++ * The host left before anybody went in. Nothing to salvage: back to the menu
++ * with the reason, rather than a lobby that will never start.
++ */
++function roomClosed(why) {
++  clearInterval(voiceRetry);
++  voiceRetry = null;
++  voice.shutdown();
++  try { session.net?.destroy(); } catch { /* already down */ }
++  session.net = null;
++  session.mode = 'solo';
++  session.roster = [];
++  session.ready = false;
++  roomLocked = false;
++  disposeRun();
++  show('multiplayer');
++  showMenuError(why);
++}
++
+ let loadWatch = null;
++let voiceRetry = null;
+ 
+ function hostMarkLoaded(id) {
+   const entry = session.roster.find((p) => p.id === id);
+   if (entry) entry.loaded = true;
++  hostRecheckLoaded();
++}
++
++/**
++ * Has everyone still here finished baking?
++ *
++ * Split out because the answer changes when somebody LEAVES as well as when
++ * somebody reports in, and only the second case used to ask.
++ */
++function hostRecheckLoaded() {
++  if (!isHost() || !loadWatch) return;
++  if (!session.roster.length) return;
+   if (session.roster.every((p) => p.loaded)) hostBegin();
+ }
+ 
+@@ -2467,6 +2602,38 @@
+     const st = document.createElement('b');
+     st.textContent = p.ready ? 'ready' : '…';
+     row.append(dot, nm, ch, st);
++
++    // kickPlayer() has existed since the room did and nothing ever called it,
++    // which is why the host could not remove anybody. Only the host sees this,
++    // and never against themselves.
++    if (isNet() && isHost() && p.id !== session.localId) {
++      const kick = document.createElement('button');
++      kick.className = 'kick';
++      kick.type = 'button';
++      kick.title = `Remove ${p.name}`;
++      kick.setAttribute('aria-label', `Remove ${p.name}`);
++      kick.textContent = '\u00d7';
++      kick.addEventListener('click', (e) => {
++        e.stopPropagation();
++        // One tap arms it, the second does it. A misplaced click throwing
++        // somebody out of a room they queued for is not recoverable.
++        if (kick.dataset.armed !== '1') {
++          kick.dataset.armed = '1';
++          kick.textContent = 'remove?';
++          kick.classList.add('armed');
++          setTimeout(() => {
++            if (!kick.isConnected) return;
++            kick.dataset.armed = '0';
++            kick.textContent = '\u00d7';
++            kick.classList.remove('armed');
++          }, 2600);
++          return;
++        }
++        kickPlayer(p.id, p.name);
++      });
++      row.appendChild(kick);
++    }
++
+     el.roster.appendChild(row);
+   });
+ 
+@@ -2486,11 +2653,26 @@
+   show('select');
+ }
+ 
++/**
++ * Everyone we should be trying to hear.
++ *
++ * NOT net.conns. On a client that map holds exactly one entry, the host — so
++ * anything driving voice off it only ever reaches the host and never the other
++ * four players. The roster is the only list that means the same thing on every
++ * machine.
++ */
++function voicePeerIds() {
++  if (!session.net) return [];
++  const ids = session.roster.map((p) => p.id).filter((id) => id && id !== session.localId);
++  // Before the first LOBBY lands the host has connections but no roster yet.
++  return ids.length ? ids : [...session.net.conns.keys()].filter((id) => id !== session.localId);
++}
++
+ function kickPlayer(id, name) {
+   if (!isHost() || !session.net) return;
+   session.net.kick(id, 'The host removed you from the room.');
+   session.roster = session.roster.filter((p) => p.id !== id);
+-  voice.drop(id);
++  voice.forget(id);
+   if (run) {
+     const r = run.remotes.get(id);
+     if (r) { r.dispose(run.scene); run.remotes.delete(id); }
+@@ -2796,7 +2978,7 @@
+ el.mic.addEventListener('click', async () => {
+   if (!voice.enabled) {
+     const ok = await requestMic();
+-    if (ok && session.net) voice.callAll(session.net.peer, [...session.net.conns.keys()]);
++    if (ok && session.net) voice.callAll(session.net.peer, voicePeerIds());
+     return;
+   }
+   voice.setMuted(!voice.muted);
+@@ -3102,6 +3284,17 @@
+   if (e.target === $('board')) closeBoard();
+ });
+ 
++// Any interaction at all is a chance to un-stick audio the browser refused to
++// start on its own. Cheap, idempotent, and it covers the case where somebody
++// joined before this tab had ever been clicked — which used to lose that
++// player's voice permanently.
++for (const type of ['pointerdown', 'keydown']) {
++  document.addEventListener(type, () => {
++    audio.resume();
++    if (voice.enabled) voice.resumeBlocked();
++  }, { passive: true });
++}
++
+ document.addEventListener('click', (ev) => {
+   if (TOUCH) return;                       // nothing to lock; the stick handles it
+   if (!run || run.over || document.pointerLockElement) return;
+--- /mnt/project/index.html	2026-09-06 08:33:09.358543866 +0000
++++ index.html	2026-09-06 12:39:51.506537553 +0000
+@@ -137,6 +137,14 @@
+           background: none; border: 1px solid transparent; border-radius: 50%; }
+   .kick:hover { color: #e08a6a; border-color: rgba(224,138,106,0.5); }
+   .player-row.is-ready b { color: var(--exit); }
++  /* Host only. Quiet until hovered, because it is next to somebody's name. */
++  .player-row .kick { margin-left: 0.5rem; padding: 0.1rem 0.4rem; font-size: 0.72rem;
++    line-height: 1.5; background: none; border: 1px solid transparent; border-radius: 3px;
++    color: var(--ink-faint); cursor: pointer; opacity: 0.5; }
++  .player-row:hover .kick { opacity: 1; }
++  .player-row .kick:hover { color: var(--blood); border-color: var(--blood); }
++  .player-row .kick.armed { opacity: 1; color: var(--blood); border-color: var(--blood);
++    letter-spacing: 0.06em; }
+   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+   #code-line { font-size: 0.82rem; color: var(--ink-dim); text-align: center; }
+   #code { font-size: 1.4rem; color: var(--exit); letter-spacing: 0.4em; display: block; margin-top: 0.25rem; }
+@@ -237,6 +245,13 @@
+     50%      { opacity: 0.85; }
+   }
+ 
++  #toast { position: fixed; left: 50%; top: 34%; transform: translateX(-50%);
++           z-index: 12; pointer-events: none; max-width: min(30rem, 84vw);
++           text-align: center; font-size: 0.9rem; line-height: 1.5;
++           color: var(--ink); text-shadow: 0 1px 14px rgba(0,0,0,0.95);
++           animation: toast-in 0.4s ease-out; }
++  @keyframes toast-in { from { opacity: 0; } to { opacity: 1; } }
++
+   #talk-indicator { position: fixed; right: 1.6rem; top: 1.4rem; z-index: 10; font-size: 0.76rem;
+                     color: var(--exit); letter-spacing: 0.14em; pointer-events: none;
+                     text-shadow: 0 1px 10px rgba(0,0,0,0.9); }
+@@ -703,6 +718,9 @@
+      them is close and makes you decide what to do about it. -->
+ <div id="ghost-near" class="hidden"><span>something is close</span></div>
+ 
++<!-- Mid-run news the player cannot act on. Fades by itself. -->
++<div id="toast" class="hidden"></div>
++
+ <div id="prompt">
+   <strong>Click to look around</strong>
+   <div id="prompt-keys"></div>
