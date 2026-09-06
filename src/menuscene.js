@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { createHouseMaterial, createGlowMaterial, createGhostMaterial, flickerSignal } from './material.js';
-import { instance as modelInstance } from './models.js';
+import { createHouseMaterial, createGlowMaterial, createGhostMaterial, flickerSignal, PropMaterials, relightModel } from './material.js';
+import { instance as modelInstance, isPooled } from './models.js';
 import { createBaker } from './bake.js';
 import { SURFACE } from './textures.js';
 import { CONFIG } from './level.js';
@@ -46,6 +46,10 @@ export class MenuScene {
     this.ready = false;
 
     this.material = createHouseMaterial(surfaces, anisotropy);
+    // The menu's lights are baked into vertex colours exactly like the house's,
+    // so there is no THREE.Light here either and an imported model needs the
+    // same relighting the game gives its props.
+    this.propMats = new PropMaterials(this.material);
     // No torch in the menu: the doorway is the whole light source and a beam
     // following the camera would flatten it.
     this.material.uniforms.uFlashOn.value = 0;
@@ -129,7 +133,7 @@ export class MenuScene {
     // supplied one.
     this.ghostMat = createGhostMaterial();
     this.ghostMat.uniforms.uRage.value = 0.22;
-    const custom = modelInstance('ghost');
+    const custom = relightModel(this.propMats, modelInstance('ghost'), 'ghost');
     if (custom) {
       this.ghost = custom;
     } else {
@@ -223,10 +227,15 @@ export class MenuScene {
 
   dispose() {
     this.scene.traverse((o) => {
-      if (o.isMesh || o.isPoints) {
-        o.geometry?.dispose();
-        o.material?.dispose();
-      }
+      if (!o.isMesh && !o.isPoints) return;
+      // A model instance is a clone that SHARES the cached original's geometry.
+      // Freeing it here reaches back into the model cache and destroys what the
+      // next scene was going to clone, so the menu would come back with the
+      // ghost missing. Its material is ours and goes with propMats below.
+      if (isPooled(o)) return;
+      o.geometry?.dispose();
+      o.material?.dispose();
     });
+    this.propMats?.dispose();
   }
 }

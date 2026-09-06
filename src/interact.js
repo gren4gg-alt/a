@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { createGlowMaterial } from './material.js';
+import { createGlowMaterial, relightModel } from './material.js';
 import { instance as modelInstance, has as hasModel } from './models.js';
 import { CONFIG } from './level.js';
 import { createBoard, applyStroke, createNoticeTexture, noticeLines } from './boards.js';
@@ -17,9 +17,23 @@ import { createBoard, applyStroke, createNoticeTexture, noticeLines } from './bo
 export const USE_RANGE = 1.9;
 
 export class Interactables {
-  constructor(scene, level, difficulty = null) {
+  /**
+   * @param propMats the run's PropMaterials, or null.
+   *
+   * Imported models MUST be run through this or they render black. There is
+   * not one light in this scene — the house is lit by a baked vertex attribute
+   * and a shader torch — so a GLB's own MeshStandardMaterial has nothing to
+   * shade against and comes out a flat silhouette with the odd specular dot on
+   * it. main.js relights everything in level.props; closets, terminals and
+   * relics are built here instead and used to miss that step entirely.
+   *
+   * Optional so this class still works standalone (tools, tests). Passing null
+   * gets you the old behaviour, black models included.
+   */
+  constructor(scene, level, difficulty = null, propMats = null) {
     this.scene = scene;
     this.level = level;
+    this.propMats = propMats;
     // Only the notice uses it, and only to leave out warnings that are not
     // true of this house.
     this.difficulty = difficulty;
@@ -41,6 +55,14 @@ export class Interactables {
     this._buildHolders();
     this._buildBoards();
     this._buildNotice();
+  }
+
+  /**
+   * Relight an imported model. See relightModel in material.js for why every
+   * GLB has to go through this, and why the procedural fallbacks below do not.
+   */
+  _relight(model, slot) {
+    return relightModel(this.propMats, model, slot);
   }
 
   // -- blackboards and the notice ------------------------------------------
@@ -139,7 +161,7 @@ export class Interactables {
       group.position.set(c.x, 0, c.z);
       group.rotation.y = c.facing;
 
-      const model = modelInstance('closet');
+      const model = this._relight(modelInstance('closet'), 'closet');
       group.add(model ?? new THREE.Mesh(geo, this.closetMat));
 
       // The peephole. Lit from inside when somebody is in there, which is the
@@ -184,7 +206,7 @@ export class Interactables {
       group.position.set(r.x, 0, r.z);
       group.rotation.y = r.facing;
 
-      const model = modelInstance('terminal');
+      const model = this._relight(modelInstance('terminal'), 'terminal');
       group.add(model ?? new THREE.Mesh(body, this.screenOff));
 
       const face = new THREE.Mesh(screen, this.screenOff);
@@ -192,7 +214,8 @@ export class Interactables {
       face.frustumCulled = false;
       group.add(face);
 
-      const relic = modelInstance('relic') ?? new THREE.Mesh(relicGeo, this.relicMat);
+      const relic = this._relight(modelInstance('relic'), 'relic')
+        ?? new THREE.Mesh(relicGeo, this.relicMat);
       relic.position.set(0, 1.42, 0);
       relic.visible = false;
       group.add(relic);

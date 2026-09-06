@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { CONFIG } from './level.js';
-import { AUTO_TINT, AUTO_TINT_THRESHOLD, AUTO_TINT_LIFT } from './assets.js';
+import { AUTO_TINT, AUTO_TINT_THRESHOLD, AUTO_TINT_LIFT, MODEL_TINT } from './assets.js';
 import { createHauntedTextures } from './textures.js';
 
 // One material for the entire house. Still unlit — all steady lighting lives in
@@ -408,6 +408,30 @@ uniform float uAmbient;
 varying vec3 vPropWorld;
 varying vec3 vPropNormal;
 `;
+
+/**
+ * Relight one imported model, the way main.js relights everything in
+ * level.props.
+ *
+ * EVERY GLB THAT ENTERS A SCENE HAS TO GO THROUGH THIS. Nothing here is lit by
+ * a THREE.Light — the house is a baked vertex attribute plus a shader torch,
+ * and the menu is a baked corridor — so a model still wearing the
+ * MeshStandardMaterial its exporter gave it has nothing to shade against and
+ * renders as a flat black silhouette with, at most, one stray specular dot on
+ * it. That is not a broken model; it is a model nobody relit.
+ *
+ * Tolerant on purpose, so it can wrap a modelInstance() call inline: a null
+ * model or a missing PropMaterials passes straight through, which keeps the
+ * `?? proceduralFallback` idiom at the call sites working unchanged.
+ *
+ * `slot` is the same key MODEL_TINT and AUTO_TINT use, so a model that arrives
+ * untextured and flat white picks up the colour already sitting in AUTO_TINT
+ * for its slot instead of being the brightest thing in the room.
+ */
+export function relightModel(propMats, model, slot) {
+  if (!model || !propMats) return model;
+  return propMats.apply(model, { tint: MODEL_TINT[slot] ?? null, slot });
+}
 
 /**
  * One material per distinct source material, per run.

@@ -26,7 +26,15 @@ export const CONFIG = {
   crouchEyeHeight: 0.75,
   hideEyeHeight: 1.35,      // at the peephole, not on the closet floor
   standClearance: 1.8,      // a collider shorter than this only blocks standing
-  walkSpeed: 3.1,
+  // Sprint is the escape verb: every ghost (2.0 to 3.2 m/s, see difficulty.js)
+  // is faster than a walking player, so once you are seen, walking is not an
+  // option. It also puts the walk inside the range the walk clip was authored
+  // at, which is what stopped the legs blending two gaits at once.
+  //
+  // Do NOT lower sprintSpeed below 4.2 without also lowering the loudness
+  // threshold in enemy.js, which gates "loud" on speed > 4.2. Sprinting under
+  // that number stops alerting the ghost entirely.
+  walkSpeed: 2.2,
   sprintSpeed: 5.0,
   crouchSpeed: 1.45,
   accel: 12.0,

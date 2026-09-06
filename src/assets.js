@@ -236,12 +236,40 @@ export const ANIMATION_TUNING = {
 
   // How far playback may be stretched to match. Outside this it is clamped,
   // because a walk played at three times speed reads as a glitch.
+  //
+  // Against the CONFIG speeds in level.js nothing comes near these edges:
+  //   crouchWalk 1.45 / 1.1 = 1.32
+  //   walk        2.4 / 1.5 = 1.60
+  //   run         5.0 / 4.0 = 1.25
+  // If you change a CONFIG speed, redo that arithmetic. A state that clamps
+  // is a state whose feet skate.
   rateRange: [0.55, 1.8],
 
   // Below this many m/s somebody counts as standing still, above runAbove
   // they count as running.
-  moveAbove: 0.35,
-  runAbove: 2.6,
+  //
+  // These are compared against GROUND speed, so they have to bracket the real
+  // CONFIG speeds in level.js: 2.4 walking, 5.0 sprinting, 1.45 crouched.
+  // runAbove sitting below the ordinary walk is what made every moving player
+  // pick 'run'.
+  moveAbove: 0.4,
+  runAbove: 3.7,
+
+  // Dead band either side of each threshold above.
+  //
+  // Without one, a speed parked on a threshold flips state every frame, and
+  // since every flip starts a fresh cross-fade that never has time to finish,
+  // two clips end up permanently blended — the character walks and runs at the
+  // same time. Entering a state needs threshold + band; leaving it needs to
+  // fall below threshold - band.
+  //
+  // A BAND MUST BE SMALLER THAN ITS OWN THRESHOLD. moveAbove - moveBand is the
+  // speed below which somebody is standing still; make that negative and no
+  // speed can ever satisfy it, so a body that starts walking never returns to
+  // idle and walks on the spot forever. That is why these are two numbers and
+  // not one shared value: 0.4 and 3.7 cannot use the same band.
+  moveBand: 0.15,   // idle below 0.25, moving above 0.55
+  runBand: 0.5,     // run above 4.2, back to walk below 3.2
 
   // Seconds to blend between two states.
   fade: 0.18,
@@ -306,6 +334,9 @@ export const AUTO_TINT = {
   terminal:  0x4a4f55,
   knife:     0x9aa0a6,
   relic:     0xc9a63c,
+  // Only reached by a ghost.glb that arrived untextured and flat white. Cold
+  // and desaturated so a supplied model does not read as another player.
+  ghost:     0x9fb0bd,
   // Anything not listed, including the player bodies.
   _default:  0x8a8175,
 };

@@ -576,7 +576,10 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     modelled++;
   }
 
-  const interact = new Interactables(scene, level, difficulty);
+  // propMats, not just scene/level: closets, terminals and relics are imported
+  // models too, and they need the same relighting the loop above does. Without
+  // it they keep their GLB's MeshStandardMaterial and render black.
+  const interact = new Interactables(scene, level, difficulty, propMats);
   const grid = new ColliderGrid([
     ...buildColliders(wallBoxes),
     ...propColliders(level.props),
@@ -709,6 +712,9 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
   const ghosts = spawns.slice(0, count).map((spawn, index) => {
     const g = new Ghost(scene, level, difficulty.ghost, lookup, {
       index, spawn, count, tint: GHOST_TINTS[index % GHOST_TINTS.length],
+      // Without this a supplied ghost.glb or knife.glb renders black, exactly
+      // as the closets did before they were given the same thing.
+      propMats,
     });
     g.onThrow = (d, knife) => {
       audio.knifeThrow(d);

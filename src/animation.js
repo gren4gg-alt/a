@@ -155,6 +155,15 @@ const CLIP_SPEED = {
 };
 
 /**
+ * States that are the same gait at different speeds.
+ *
+ * Moving between any two of these keeps the stride phase instead of starting
+ * the incoming clip at frame 0, so the body does not swap which foot is
+ * forward halfway through a step.
+ */
+const GAIT = new Set(['walk', 'run', 'crouchWalk']);
+
+/**
  * One character's animation. Owns a mixer, resolves states to clips lazily,
  * and cross-fades between them.
  *
@@ -224,7 +233,8 @@ export class CharacterAnimator {
     const next = this._action(state);
 
     if (state !== this.state) {
-      const previous = this.state ? this.actions.get(this.state) : null;
+      const from = this.state;
+      const previous = from ? this.actions.get(from) : null;
       this.state = state;
       // fadeOut/fadeIn rather than crossFadeTo. They do the same thing here
       // and do not care whether the outgoing action was still running, which
@@ -232,7 +242,17 @@ export class CharacterAnimator {
       // that case.
       if (previous && previous !== next) previous.fadeOut(ANIMATION_TUNING.fade);
       if (next && previous !== next) {
-        next.reset().setEffectiveWeight(1).fadeIn(ANIMATION_TUNING.fade).play();
+        next.reset();
+        // Walk and run are the same gait at two speeds. Starting the incoming
+        // clip at the phase the outgoing one had reached keeps the same foot
+        // forward; reset()ing to frame 0 is what makes the legs jump at the
+        // moment somebody breaks into a sprint.
+        if (previous && GAIT.has(state) && GAIT.has(from)) {
+          const a = previous.getClip().duration || 1;
+          const b = next.getClip().duration || 1;
+          next.time = ((previous.time % a) / a) * b;
+        }
+        next.setEffectiveWeight(1).fadeIn(ANIMATION_TUNING.fade).play();
       }
     }
 
@@ -265,12 +285,43 @@ export class CharacterAnimator {
  * Kept out of the animator so the same rules apply to a remote player, to the
  * preview in the character room, and to anything added later.
  */
-export function stateFor({ speed = 0, crouching = false, downed = false } = {}) {
+export function stateFor({ speed = 0, crouching = false, downed = false, current = null } = {}) {
   if (downed) return 'downed';
-  const moving = speed > ANIMATION_TUNING.moveAbove;
+
+  // HYSTERESIS. Pass the state the body is already in and the thresholds move
+  // to make leaving it harder than entering it.
+  //
+  // Without this, a speed sitting on a threshold flips state every frame. Each
+  // flip starts a fresh cross-fade, the flips arrive faster than the fade
+  // finishes, and neither action ever reaches full weight or zero — so the
+  // mixer holds a permanent blend of two clips. That is what a character
+  // walking and running at the same time actually is.
+  //
+  // Callers that have no state to report may omit `current`; they simply get
+  // the old sharp-threshold behaviour.
+  const wasMoving = current === 'walk' || current === 'run' || current === 'crouchWalk';
+  const wasRunning = current === 'run';
+
+  const moving = speed > band(ANIMATION_TUNING.moveAbove, ANIMATION_TUNING.moveBand, wasMoving);
   if (crouching) return moving ? 'crouchWalk' : 'crouchIdle';
   if (!moving) return 'idle';
-  return speed > ANIMATION_TUNING.runAbove ? 'run' : 'walk';
+  return speed > band(ANIMATION_TUNING.runAbove, ANIMATION_TUNING.runBand, wasRunning) ? 'run' : 'walk';
+}
+
+/**
+ * The threshold to compare against, widened or narrowed by the dead band
+ * depending on whether we are already in the state it gates.
+ *
+ * The clamp is the whole point. A band wider than its own threshold puts the
+ * exit at or below zero, and since ground speed is never negative, nothing can
+ * ever satisfy it — a body that started walking would keep walking on the spot
+ * forever, because idle had become unreachable. Capping the band at just under
+ * the threshold means a wrong number in ANIMATION_TUNING degrades to weak
+ * hysteresis instead of a stuck state.
+ */
+function band(threshold, width, inState) {
+  const w = Math.min(Math.max(width ?? 0, 0), threshold * 0.9);
+  return threshold + (inState ? -w : w);
 }
 
 function findSkinned(root) {

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { findPath } from './generate.js';
 import { CONFIG } from './level.js';
-import { createGhostMaterial, createGlowMaterial } from './material.js';
+import { createGhostMaterial, createGlowMaterial, relightModel } from './material.js';
 import { instance as modelInstance, has as hasModel } from './models.js';
 
 // ---------------------------------------------------------------------------
@@ -36,6 +36,10 @@ export class Ghost {
    *   their trap timers so three of them do not all drop one on the same frame.
    * @param options.spawn where it starts; defaults to the level's single spawn.
    * @param options.count how many ghosts exist, so shared budgets can be split.
+   * @param options.propMats the run's PropMaterials. Required if you supply a
+   *   ghost.glb or knife.glb: an imported model that skips relighting renders
+   *   as a black silhouette, because nothing in this scene is lit by a
+   *   THREE.Light. See relightModel in material.js.
    */
   constructor(scene, level, params, lookup, options = {}) {
     this.level = level;
@@ -43,6 +47,7 @@ export class Ghost {
     this.lookup = lookup;
     this.p = params;
     this.index = options.index ?? 0;
+    this.propMats = options.propMats ?? null;
 
     const spawn = options.spawn ?? level.ghostSpawn;
     this.pos = new THREE.Vector3(spawn.x, 0, spawn.z);
@@ -90,7 +95,10 @@ export class Ghost {
     if (options.tint !== undefined) {
       this.material.uniforms.uCalm.value = new THREE.Color().setHex(options.tint, THREE.SRGBColorSpace);
     }
-    const custom = modelInstance('ghost');
+    // Relit, not left raw. The ghost shader in this.material is never applied
+    // to a supplied model — it is built for the capsule — so without this a
+    // custom ghost.glb is a black cut-out rather than a figure.
+    const custom = relightModel(this.propMats, modelInstance('ghost'), 'ghost');
     if (custom) {
       this.mesh = custom;
       this.usesModel = true;
@@ -481,7 +489,7 @@ export class Ghost {
 
   _knifeMesh() {
     return this.knifeModel
-      ? modelInstance('knife')
+      ? relightModel(this.propMats, modelInstance('knife'), 'knife')
       : new THREE.Mesh(this.knifeGeo, this.knifeMaterial);
   }
 

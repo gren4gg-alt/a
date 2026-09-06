@@ -22,16 +22,31 @@ const INTERP_DELAY = 120;   // ms
 const BUFFER_KEEP = 1200;   // ms of history
 
 /**
- * The frame time the derived velocity is divided by.
+ * Fallback frame time for the derived velocity, used only when update() is
+ * called without a real dt.
  *
- * Deliberately a fixed 1/60 rather than the real elapsed time. Positions here
- * come from interpolating a 15 Hz stream at a fixed delay, so the distance
- * moved between two calls is a function of the stream, not of how fast this
- * machine happens to be rendering. Dividing by a real dt would make a player
- * on a 144 Hz screen read as moving more than twice as fast as the same player
- * on a 60 Hz one, and the ghost's hearing is driven off this number.
+ * This used to be a fixed 1/60 in ALL cases, on the reasoning that positions
+ * come from interpolating a 15 Hz stream and so are independent of the local
+ * frame rate. The positions are — but update() runs once per rendered frame,
+ * and the interpolation target advances in real time, so the distance covered
+ * between two calls is trueSpeed * realFrameTime. Dividing that by a hardcoded
+ * 1/60 yields trueSpeed * realFrameTime * 60: a remote player read at 0.42x
+ * their real speed on a 144 Hz screen and 2x on a 30 Hz one. The fixed step
+ * caused exactly the frame-rate dependence it was meant to prevent, and the
+ * ghost's hearing is driven off this number.
  */
 const VEL_STEP = 1 / 60;
+
+/**
+ * Seconds the animation speed is averaged over.
+ *
+ * The raw per-frame speed is spiky even once the divisor is right: the buffer
+ * runs dry on stream jitter, update() clamps to the newest sample, the
+ * position freezes for a frame and then catches up in one jump. Feeding that
+ * straight to stateFor() had bodies flicking between idle, walk and run several
+ * times a second, which reads on screen as two clips playing at once.
+ */
+const SPEED_SMOOTHING = 0.14;
 
 export const PLAYER_COLORS = [
   0xffb066, 0x7fd6ff, 0x9fffc8, 0xff8fa8, 0xd0a8ff, 0xffe58f,
@@ -53,6 +68,9 @@ export class RemotePlayer {
 
     this.pos = new THREE.Vector3();
     this.vel = new THREE.Vector3();
+    // Low-passed |vel|, for picking an animation state. Kept separate so the
+    // ghost's hearing still sees the instantaneous number.
+    this.animSpeed = 0;
     this.yaw = 0;
     this.downed = false;
     this.dead = false;
@@ -128,7 +146,15 @@ export class RemotePlayer {
 
     // Derived velocity: the ghost's hearing check needs it on the host, and it
     // is cheaper to infer than to put another field in every snapshot.
-    this.vel.set((this.pos.x - prevX) / VEL_STEP, 0, (this.pos.z - prevZ) / VEL_STEP);
+    //
+    // Real elapsed time, not a fixed step — see the note on VEL_STEP.
+    const step = dt > 1e-4 ? dt : VEL_STEP;
+    this.vel.set((this.pos.x - prevX) / step, 0, (this.pos.z - prevZ) / step);
+
+    // Exponential smoothing, framerate-correct because the coefficient is
+    // derived from the step rather than assumed per frame.
+    const raw = Math.hypot(this.vel.x, this.vel.z);
+    this.animSpeed += (raw - this.animSpeed) * (1 - Math.exp(-step / SPEED_SMOOTHING));
 
     this.crouching = b.crouching;
     // Someone in a closet is inside it, not standing in front of it.
@@ -137,12 +163,19 @@ export class RemotePlayer {
     this.bead.visible = !this.dead && !stowed;
 
     if (this.animator) {
-      // The speed comes from the interpolated position, which is the same
-      // number the ghost's hearing uses — so what you see somebody doing is
-      // what the house thinks they are doing.
-      const speed = Math.hypot(this.vel.x, this.vel.z);
+      // The smoothed speed, not the raw one. The raw number is what the
+      // ghost's hearing uses and it wants every spike; an animation state
+      // wants the trend, because a single spiky frame that crosses runAbove
+      // costs a whole cross-fade.
+      //
+      // Passing the current state gives stateFor() its hysteresis: see the
+      // note there for why a sharp threshold blends two clips forever.
+      const speed = this.animSpeed;
       this.animator.play(stateFor({
-        speed, crouching: this.crouching, downed: this.downed,
+        speed,
+        crouching: this.crouching,
+        downed: this.downed,
+        current: this.animator.state,
       }), speed);
       this.animator.update(dt);
       // The clip is doing the crouching and the falling over, so the old
