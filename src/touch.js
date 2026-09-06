@@ -72,7 +72,6 @@ export class TouchControls {
     this.lookId = null;
     this.stickId = null;
     this.lastLook = { x: 0, y: 0 };
-    this.sensitivity = 0.26;
     this._build();
   }
 
@@ -120,9 +119,13 @@ export class TouchControls {
     });
     this.lookZone.addEventListener('pointermove', (e) => {
       if (e.pointerId !== this.lookId || !this.player) return;
-      this.player.applyLook(
-        (e.clientX - this.lastLook.x) * this.sensitivity,
-        (e.clientY - this.lastLook.y) * this.sensitivity,
+      // Radians per pixel, from the touch slider only. The old path went
+      // through the mouse sensitivity as well and came out around a tenth of
+      // what a thumb needs.
+      const k = (settings.data.input.touchSensitivity ?? 5) * 0.0009;
+      this.player.applyLookRadians(
+        (e.clientX - this.lastLook.x) * k,
+        (e.clientY - this.lastLook.y) * k,
       );
       this.lastLook = { x: e.clientX, y: e.clientY };
     });

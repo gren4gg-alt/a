@@ -8,7 +8,7 @@ import { CONFIG } from './level.js';
 // scattered across modules, so a change lands everywhere at once.
 // ---------------------------------------------------------------------------
 
-const KEY = 'darkhouse.settings.v8';
+const KEY = 'darkhouse.settings.v10';
 
 export const QUALITY = {
   potato: {
@@ -43,12 +43,14 @@ export const QUALITY = {
  * can reach the corners of.
  */
 export const TOUCH_DEFAULTS = {
-  interact:   { x: 0.860, y: 0.700, size: 96 },
-  power:      { x: 0.745, y: 0.520, size: 74 },
-  sprint:     { x: 0.965, y: 0.480, size: 70 },
-  crouch:     { x: 0.965, y: 0.800, size: 70 },
-  flashlight: { x: 0.700, y: 0.855, size: 64 },
-  talk:       { x: 0.950, y: 0.150, size: 58 },
+  interact:   { x: 0.855, y: 0.720, size: 84 },
+  power:      { x: 0.740, y: 0.520, size: 64 },
+  sprint:     { x: 0.955, y: 0.480, size: 62 },
+  crouch:     { x: 0.955, y: 0.815, size: 62 },
+  flashlight: { x: 0.705, y: 0.880, size: 58 },
+  // Kept clear of the top-right corner: the timer and the door counter live
+  // there and the button was landing on top of both.
+  talk:       { x: 0.560, y: 0.115, size: 52 },
 };
 
 /** Order here is the order they appear in the controls screen. */
@@ -63,6 +65,8 @@ export const BINDABLE = [
   { id: 'interact',   label: 'Pick someone up',  def: 'KeyE' },
   { id: 'power',      label: 'Use your ability', def: 'KeyQ' },
   { id: 'talk',       label: 'Push to talk',     def: 'KeyV' },
+  { id: 'cursor',     label: 'Free the mouse',   def: 'AltLeft' },
+  { id: 'fullscreen', label: 'Fullscreen',       def: 'KeyG' },
   { id: 'stats',      label: 'Show frame stats', def: 'F2' },
 ];
 
@@ -79,6 +83,10 @@ const DEFAULTS = () => ({
   input: {
     sensitivity: onTouch ? 3.4 : 2.2,
     invertY: false,
+    // A thumb drag covers a few hundred pixels; a mouse sweep covers thousands.
+    // Sharing one number made one of them unusable, so touch has its own.
+    // 5.0 turns roughly 90 degrees per half-screen swipe.
+    touchSensitivity: 5.0,
     // Hold to crouch by default; a toggle suits long crawls through tunnels.
     crouchToggle: false,
   },

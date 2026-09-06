@@ -589,61 +589,6 @@ like a metronome. It gets shorter and harsher while hunting.
 Only the three nearest ghosts within 16 m are audible. With up to 28 of them a
 distance check alone would produce a constant wall of creaking.
 
-## Netcode: the failure cases
-
-Peer to peer has no server to arbitrate, so each of these is handled explicitly
-rather than assumed away.
-
-**A host that closed their tab leaves the room code registered.** The signalling
-server can take a long time to notice, so a joiner's channel opens and then
-nothing ever arrives. Opening a connection is therefore not treated as success:
-the client requires an actual reply within nine seconds, and says the room is
-not answering rather than sitting on a connected-but-silent screen.
-
-**A room code is guessable**, being derived from the code itself. Somebody can
-register it first, and two hosts can collide by chance. PeerServer reports
-`unavailable-id`, so a collision quietly takes a different code instead of
-failing with an error the player cannot act on.
-
-**Nobody can impersonate the host.** Every handler is wrapped in a sender-role
-guard: a client accepts nothing that did not come from the host peer, and a host
-ignores anything only it should be sending. More importantly, **a client refuses
-incoming data connections entirely** — peer ids are visible in the lobby, so
-without that a stranger could open a channel straight to a client and forge
-state. Voice is unaffected; media calls arrive on a different event.
-
-**A client that misses START or loads late** no longer freezes everyone. START
-is re-sent to anyone who has not reported in after six seconds, and after
-thirty-five the run begins without them and they are dropped with a reason. The
-old code waited for all `loaded` acks forever.
-
-**Voice failing between two peers is contained.** Game state is star topology
-through the host, so a pair that cannot complete its own handshake — strict NAT,
-corporate firewall — loses only that one audio link. It is detected on a twelve
-second timeout and reported in the mic line as "N unreachable" rather than
-silently missing.
-
-**Unreliable packets arrive out of order.** Positions carry a sequence number
-and stale ones are dropped; without it an older packet landing after a newer one
-is taken as the latest word and snaps everybody backwards. Lobby state —
-character picks and ready flags — deliberately travels on the reliable channel
-*and* as a whole-roster snapshot rather than as deltas, so a reorder there
-cannot desync a selection.
-
-**Names are sanitised on arrival**: control characters, zero-width joiners and
-bidirectional overrides all stripped, then capped. Everything reaches the DOM
-through `textContent`, so this is about impersonation and legibility rather than
-script injection.
-
-```
-node tools/check-handlers.js
-```
-
-verifies every `net.on(...)` balances its own parentheses. That check exists
-because a missing close on a guard wrapper still *parses* — the stray depth is
-absorbed by a later close and one handler is silently passed as an argument to
-the next. `node --check` is perfectly happy and the game is quietly broken.
-
 ## Multiplayer
 
 Open a house, share the five-character code, up to six people.
@@ -789,7 +734,14 @@ is only used to introduce peers — all gameplay traffic is direct.
 ```
 node tools/check-dom.js       # every el.<name> and every id resolves
 node tools/check-downed.js    # the downed / last-stand wiring is present
+node tools/check-handlers.js  # every net.on(...) balances its own parens
+node tools/check-calls.js     # every audio.X() and voice.X() exists
 ```
+
+`check-calls.js` exists because one careless edit removed three methods at once
+— the one it was aiming at, plus two that happened to sit in the same span. The
+module still parses, the game still boots, and it throws only when somebody
+finally uses a terminal, mid-run.
 
 Verifies that every `el.<name>` used in `main.js` is defined in the `el` literal,
 that every id either looks up exists in `index.html`, and that nothing is

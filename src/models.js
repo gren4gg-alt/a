@@ -141,7 +141,21 @@ export function fitInfo(slot, w, h, d) {
   if (!entry) return null;
   const s = entry.size;
   if (s.x < 1e-4 || s.y < 1e-4 || s.z < 1e-4) return null;
-  const k = Math.min(w / s.x, h / s.y, d / s.z);
+
+  // HEIGHT LEADS. Fitting to the tightest of three axes sounds safe and makes
+  // everything tiny: a chair modelled in a 1x1x1 box asked for 0.55 wide and
+  // 0.95 tall takes the 0.55 and ends up knee-high. Height is the axis a person
+  // reads, so match that, and let the footprint be whatever the model actually
+  // is — the collider is rebuilt from the result, so it still agrees with what
+  // you can see.
+  let k = h / s.y;
+
+  // The one thing worth refusing is a piece so wide it swallows the room. Cap
+  // the footprint at a generous multiple of what the generator reserved.
+  const maxFoot = Math.max(w, d) * 2.4;
+  const foot = Math.max(s.x, s.z) * k;
+  if (foot > maxFoot) k *= maxFoot / foot;
+
   return { k, w: s.x * k, h: s.y * k, d: s.z * k };
 }
 

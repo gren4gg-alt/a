@@ -305,40 +305,6 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
     color: 0x9fffc8, intensity: 3.4, range: 12, flicker: 0,
   });
 
-  // -- 7. Props -------------------------------------------------------------
-
-  const props = [];
-  for (const r of rooms) {
-    if (r.isCorridor || r.isExit) continue;
-    const [lo, hi] = r.propRange ?? r.plot?.propRange ?? [1, 3];
-    const n = lo + ((rand() * (hi - lo + 1)) | 0);
-    // Props now avoid each other as well as the doorway spines. They used to
-    // be placed independently, so two could occupy the same square metre.
-    const here = [];
-
-    // Stacks go down FIRST. They are the only cover in the house that is not a
-    // wall, they need a clear couple of metres, and if the furniture is placed
-    // first there is never anywhere left to put them.
-    const area = (r.x1 - r.x0) * (r.z1 - r.z0);
-    if (area > 42 && rand() < 0.6) {
-      const spot = quadrantSpot(r, rand, 1.7, here);
-      if (spot) {
-        const stack = rand() < 0.5
-          ? pyramidStack(spot.x, spot.z, r.id, rand)
-          : ringStack(spot.x, spot.z, r.id, rand);
-        props.push(...stack);
-        here.push(...stack);
-      }
-    }
-
-    for (let k = 0; k < n; k++) {
-      const p = placeFurniture(r, rand, here);
-      if (!p) continue;
-      props.push(p);
-      here.push(p);
-    }
-  }
-
   // -- 8. Loot --------------------------------------------------------------
 
   const candidates = rooms.filter((r) => !r.isCorridor && r !== entrance && !r.isExit);
@@ -366,22 +332,21 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
   shuffle(closetRooms, rand);
   const closets = [];
   const closetTarget = Math.max(2, Math.round(cols * rows * (difficulty.closetShare ?? 0.10)));
-  const propsByRoom = new Map();
-  for (const pr of props) {
-    if (!propsByRoom.has(pr.room)) propsByRoom.set(pr.room, []);
-    propsByRoom.get(pr.room).push(pr);
-  }
+
+  // Fixtures go down BEFORE the furniture, and the furniture works around
+  // them. The other way round, tripling the prop count quietly starved the
+  // hardest house of the closets it most needs — 26% where 30% was asked for,
+  // with no error anywhere, just fewer places to hide.
   const placed = new Map();     // roomId -> things already put down there
 
   for (const r of closetRooms) {
     if (closets.length >= closetTarget) break;
-    const blockers = [...(propsByRoom.get(r.id) ?? []), ...(placed.get(r.id) ?? [])];
+    const blockers = placed.get(r.id) ?? [];
     const spot = againstWall(r, rand, 0.55, blockers);
     if (!spot) continue;
     const closet = { id: `k${closets.length}`, room: r.id, ...spot, w: 1.1, d: 0.8, h: 2.15 };
     closets.push(closet);
-    if (!placed.has(r.id)) placed.set(r.id, []);
-    placed.get(r.id).push(closet);
+    reserve(placed, r.id, spot, 1.3, 1.0);
   }
 
   // -- 8c. Relics, their terminals, and the door that needs them ------------
@@ -398,8 +363,7 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
   const relics = [];
   for (let k = 0; k < 4 && k < relicRooms.length; k++) {
     const r = relicRooms[k];
-    const blockers = [...(propsByRoom.get(r.id) ?? []), ...(placed.get(r.id) ?? [])];
-    const spot = againstWall(r, rand, 0.7, blockers);
+    const spot = againstWall(r, rand, 0.7, placed.get(r.id) ?? []);
     const relic = {
       id: `relic${k}`,
       name: RELIC_NAMES[k],
@@ -410,11 +374,7 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
       facing: spot ? spot.facing : 0,
     };
     relics.push(relic);
-    // Register it, or anything placed in this room afterwards — a blackboard,
-    // most likely — can land on top of the terminal or block the spot you have
-    // to stand in to use it.
-    if (!placed.has(r.id)) placed.set(r.id, []);
-    placed.get(r.id).push({ ...relic, w: 1.0, d: 0.7 });
+    if (spot) reserve(placed, r.id, spot, 1.1, 0.8);
   }
 
   // -- 8d. Blackboards, and the notice by the front door -------------------
@@ -430,13 +390,11 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
   const boardTarget = Math.max(2, Math.round(cols * rows * (difficulty.boardShare ?? 0.12)));
   for (const r of boardRooms) {
     if (boards.length >= boardTarget) break;
-    const blockers = [...(propsByRoom.get(r.id) ?? []), ...(placed.get(r.id) ?? [])];
-    const spot = againstWall(r, rand, 0.18, blockers);
+    const spot = againstWall(r, rand, 0.18, placed.get(r.id) ?? []);
     if (!spot) continue;
     const board = { id: `b${boards.length}`, room: r.id, ...spot };
     boards.push(board);
-    if (!placed.has(r.id)) placed.set(r.id, []);
-    placed.get(r.id).push({ ...board, w: 1.9, d: 0.5 });
+    reserve(placed, r.id, spot, 2.1, 0.6);
   }
 
   // The rules, on the wall of the room you wake up in.
@@ -444,10 +402,11 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
   // spines, so it must genuinely be a last resort rather than the usual path.
   let noticeSpot = null;
   for (let attempt = 0; attempt < 6 && !noticeSpot; attempt++) {
-    noticeSpot = againstWall(entrance, rand, 0.14, propsByRoom.get(entrance.id) ?? []);
+    noticeSpot = againstWall(entrance, rand, 0.14, placed.get(entrance.id) ?? []);
   }
   noticeSpot = noticeSpot
     ?? { x: mid(entrance.x0, entrance.x1) + 1.6, z: entrance.z0 + 0.14, facing: Math.PI };
+  reserve(placed, entrance.id, noticeSpot, 1.7, 0.6);
 
   // Four holders across the face of the exit door.
   const exitCx = mid(exit.x0, exit.x1);
@@ -457,6 +416,42 @@ export function generateLevel(difficulty, seed = (Math.random() * 1e9) | 0) {
     x: exitCx + (i - 1.5) * 0.75,
     z: exitCz,
   }));
+
+  // -- 7. Props -------------------------------------------------------------
+
+  const props = [];
+  for (const r of rooms) {
+    if (r.isCorridor || r.isExit) continue;
+    const [lo, hi] = r.propRange ?? r.plot?.propRange ?? [1, 3];
+    const n = lo + ((rand() * (hi - lo + 1)) | 0);
+    // Props now avoid each other as well as the doorway spines. They used to
+    // be placed independently, so two could occupy the same square metre.
+    // Everything already in this room — closets, terminals, boards — is an
+    // obstacle for the furniture, not the other way round.
+    const here = [...(placed.get(r.id) ?? [])];
+
+    // Stacks go down FIRST. They are the only cover in the house that is not a
+    // wall, they need a clear couple of metres, and if the furniture is placed
+    // first there is never anywhere left to put them.
+    const area = (r.x1 - r.x0) * (r.z1 - r.z0);
+    if (area > 42 && rand() < 0.6) {
+      const spot = quadrantSpot(r, rand, 1.7, here);
+      if (spot) {
+        const stack = rand() < 0.5
+          ? pyramidStack(spot.x, spot.z, r.id, rand)
+          : ringStack(spot.x, spot.z, r.id, rand);
+        props.push(...stack);
+        here.push(...stack);
+      }
+    }
+
+    for (let k = 0; k < n; k++) {
+      const p = placeFurniture(r, rand, here);
+      if (!p) continue;
+      props.push(p);
+      here.push(p);
+    }
+  }
 
   // -- 9. Ghost spawn and par time -----------------------------------------
 
@@ -595,6 +590,23 @@ function roomName(p, rand) {
 }
 
 const RELIC_NAMES = ['Brass key', 'Cracked lens', 'Bone comb', 'Iron seal'];
+
+/**
+ * Register a fixture as TWO obstacles: the thing itself, and the square a
+ * player has to stand in to use it.
+ *
+ * Furniture is placed after the fixtures now, so without this a wardrobe
+ * happily parks directly in front of a closet door. The object was never the
+ * problem; the approach was.
+ */
+function reserve(placed, roomId, spot, w, d) {
+  if (!placed.has(roomId)) placed.set(roomId, []);
+  const list = placed.get(roomId);
+  list.push({ x: spot.x, z: spot.z, w, d });
+  const ax = spot.x - Math.sin(spot.facing) * 1.15;
+  const az = spot.z - Math.cos(spot.facing) * 1.15;
+  list.push({ x: ax, z: az, w: 1.5, d: 1.5 });
+}
 
 /** Circle of radius r at (x,z) against an axis-aligned obstacle footprint. */
 function overlaps(x, z, r, o) {

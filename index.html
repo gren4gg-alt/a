@@ -480,7 +480,26 @@
 
   /* On a phone the HUD has to give the controls room, and the menus have to
      stop assuming a mouse-sized hit area. */
+  /* In landscape the right half is buttons and the lower left is the stick,
+     so every readout stacks down the free top-left column. Previously the
+     timer, the door counter and the TALK button all sat in the same corner. */
   @media (pointer: coarse) {
+    #roster-hud { left: 0.8rem; top: 0.5rem; gap: 0.1rem; }
+    .rh { font-size: 0.72rem; }
+    #hud { left: 0.8rem; top: auto; bottom: auto;
+           top: 3.4rem; }
+    #hud-room { font-size: 1rem; letter-spacing: 0.1em; }
+    #safe-tag, #carry-line { font-size: 0.66rem; }
+    #door-status { left: 0.8rem; right: auto; top: 8.2rem; font-size: 0.7rem; }
+    #hud-timer { left: 0.8rem; right: auto; bottom: auto; top: 9.7rem; font-size: 0.78rem; }
+    #power { left: 0.8rem; right: auto; bottom: auto; top: 11.2rem;
+             width: 8rem; text-align: left; }
+    #power-line { font-size: 0.66rem; }
+    #carrying { left: 0.8rem; right: auto; top: 13.2rem; font-size: 0.7rem; }
+    #talk-indicator { left: 50%; right: auto; transform: translateX(-50%); top: 0.5rem; }
+    #use { top: 42%; font-size: 0.82rem; }
+    #reticle { opacity: 0.35; }
+
     /* The diorama scrim has to cover the whole width once the panel does, or
        the text sits on top of a lit wall and is unreadable. */
     .screen.diorama {
@@ -504,11 +523,6 @@
     }
     #select > .row-h .btn, #modes > .row-h .btn { flex: 1; }
 
-    #hud { left: 1rem; bottom: auto; top: 5.2rem; }
-    #hud-timer { right: 1rem; bottom: auto; top: 1.2rem; }
-    #power { right: 1rem; bottom: auto; top: 2.9rem; width: 9rem; }
-    #roster-hud { left: 1rem; top: 1.2rem; }
-    #use { top: 46%; }
     .screen.diorama { padding: 1.5rem 1.2rem; }
     .screen.diorama h1 { font-size: clamp(2rem, 11vw, 3rem); }
     .menu-list button { padding: 1rem 0 1rem 1rem; font-size: 1.05rem; }
@@ -830,6 +844,10 @@
     <div class="field">
       <label for="sensitivity">Mouse sensitivity</label><output id="sensitivity-value"></output>
       <input type="range" id="sensitivity" min="4" max="60">
+    </div>
+    <div class="field" id="touch-sensitivity-row">
+      <label for="touch-sensitivity">Look sensitivity (touch)</label><output id="touch-sensitivity-value"></output>
+      <input type="range" id="touch-sensitivity" min="10" max="160">
     </div>
     <label class="check"><input type="checkbox" id="invert-y">Invert vertical look</label>
     <label class="check"><input type="checkbox" id="crouch-toggle">Crouch toggles instead of being held</label>

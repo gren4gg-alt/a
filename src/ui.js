@@ -10,7 +10,7 @@ import { settings, QUALITY, BINDABLE, keyLabel } from './settings.js';
 
 const $ = (id) => document.getElementById(id);
 
-export function buildSettingsUI({ onChange, onTest }) {
+export function buildSettingsUI({ onChange, onTest, isTouch = false }) {
   const tabs = [...document.querySelectorAll('#settings-tabs [data-tab]')];
   const panels = {
     audio: $('tab-audio'), controls: $('tab-controls'), graphics: $('tab-graphics'),
@@ -127,6 +127,18 @@ export function buildSettingsUI({ onChange, onTest }) {
     settings.save();
   });
 
+  const touchSens = $('touch-sensitivity');
+  const touchSensOut = $('touch-sensitivity-value');
+  const touchRow = $('touch-sensitivity-row');
+  touchRow.classList.toggle('hidden', !isTouch);
+  touchSens.value = String(Math.round((settings.data.input.touchSensitivity ?? 5) * 10));
+  touchSensOut.textContent = (Number(touchSens.value) / 10).toFixed(1);
+  touchSens.addEventListener('input', () => {
+    settings.data.input.touchSensitivity = Number(touchSens.value) / 10;
+    touchSensOut.textContent = settings.data.input.touchSensitivity.toFixed(1);
+    settings.save();
+  });
+
   const invert = $('invert-y');
   invert.checked = settings.data.input.invertY;
   invert.addEventListener('change', () => {
@@ -197,6 +209,8 @@ export function buildSettingsUI({ onChange, onTest }) {
     ptt.checked = settings.data.voice.pushToTalk;
     micGain.value = String(Math.round(settings.data.voice.inputGain * 100));
     micGainOut.textContent = `${micGain.value}%`;
+    touchSens.value = String(Math.round((settings.data.input.touchSensitivity ?? 5) * 10));
+    touchSensOut.textContent = (Number(touchSens.value) / 10).toFixed(1);
     sens.value = String(Math.round(settings.data.input.sensitivity * 10));
     sensOut.textContent = settings.data.input.sensitivity.toFixed(1);
     invert.checked = settings.data.input.invertY;

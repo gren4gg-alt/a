@@ -572,8 +572,6 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     material.uniforms.uFlashOn.value = material.uniforms.uFlashOn.value > 0.5 ? 0 : 1;
   };
   player.onDebugToggle = () => el.stats.classList.toggle('on');
-  player.onFullscreen = () => toggleFullscreen();
-  player.onCursor = () => toggleCursor();
   player.onPower = () => firePower();
   player.onInteract = () => useNearest();
   if (TOUCH) {
@@ -2434,6 +2432,7 @@ function buildMenu() {
 // ---------------------------------------------------------------------------
 
 const settingsUI = buildSettingsUI({
+  isTouch: TOUCH,
   onChange: () => { applyGraphics(); applyAudio(); if (run) el.promptKeys.innerHTML = promptText(); },
   onTest: (key) => { audio.resume(); if (key === 'sfx' || key === 'master') audio.pickup(60); },
 });
@@ -2732,6 +2731,22 @@ function toggleCursor() {
   const r = canvas.requestPointerLock();
   if (r && typeof r.catch === 'function') r.catch(() => {});
 }
+
+/**
+ * Fullscreen and cursor release, handled globally.
+ *
+ * These used to hang off the Player, which meant they only existed while a run
+ * was up and only if that object had been wired correctly. They are window
+ * concerns, not player concerns, so they live here and work everywhere.
+ */
+window.addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  const action = settings.actionFor(e.code);
+  if (action !== 'fullscreen' && action !== 'cursor') return;
+  e.preventDefault();
+  if (action === 'fullscreen') toggleFullscreen();
+  else toggleCursor();
+});
 
 // One Escape handler for every overlay. Pointer lock consumes its own Escape
 // before this ever sees it, so releasing the mouse and closing a panel never

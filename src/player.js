@@ -134,12 +134,21 @@ export class Player {
     }
   }
 
-  /** Look, in the same units as a mouse delta. Used by the touch look zone. */
+  /** Look, in mouse-delta units. */
   applyLook(dx, dy) {
     const sens = settings.data.input.sensitivity * 0.001;
+    this.applyLookRadians(dx * sens, dy * sens);
+  }
+
+  /**
+   * Look, in radians. Touch computes its own scaling — a thumb drag and a
+   * mouse move are not the same gesture and sharing one number made one of
+   * them wrong whichever way it was set.
+   */
+  applyLookRadians(yawDelta, pitchDelta) {
     const invert = settings.data.input.invertY ? -1 : 1;
-    this.yaw -= dx * sens;
-    this.pitch -= dy * sens * invert;
+    this.yaw -= yawDelta;
+    this.pitch -= pitchDelta * invert;
     const lim = Math.PI / 2 - 0.05;
     this.pitch = Math.max(-lim, Math.min(lim, this.pitch));
   }
@@ -159,9 +168,12 @@ export class Player {
 
     this._onKeyDown = (e) => {
       if (e.repeat) return;
-      // Only swallow the browser default once we actually own the pointer,
-      // or F2 and friends stop working on the settings screens.
-      if (this.locked && e.code !== 'Escape') e.preventDefault();
+      // Swallow the default while we own the pointer, and always for a key
+      // that is actually bound to something. Alt in particular focuses the
+      // browser menu bar otherwise, and the game would lose the keyboard the
+      // moment you used it to free the cursor.
+      const bound = settings.actionFor(e.code);
+      if ((this.locked || bound) && e.code !== 'Escape') e.preventDefault();
       press(e.code, true);
     };
     this._onKeyUp = (e) => press(e.code, false);

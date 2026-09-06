@@ -183,6 +183,18 @@ export class Audio {
                   filter: { type: 'bandpass', from: 2400, to: 900, Q: 2 } });
   }
 
+  /**
+   * A terminal running. Deliberately unpleasant and deliberately loud: it is
+   * the only feedback that the puzzle is calling them towards you, and without
+   * it the whole risk of the mechanic is invisible.
+   */
+  terminalNoise() {
+    this._burst({ type: 'square', freq: 240, freq2: 190, dur: 0.5, gain: 0.10,
+                  filter: { type: 'bandpass', from: 900, to: 1500, Q: 3 } });
+    this._burst({ noise: true, dur: 0.6, gain: 0.09,
+                  filter: { type: 'highpass', from: 1800, to: 2600 } });
+  }
+
   escape() {
     [392, 523, 659, 784].forEach((f, i) => {
       setTimeout(() => this._burst({ type: 'triangle', freq: f, dur: 0.9, gain: 0.14 }), i * 110);
