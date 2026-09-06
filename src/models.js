@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
-import { MODEL_ASSETS, USE_ASSET_MODELS } from './assets.js';
+import { MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS } from './assets.js';
 
 // ---------------------------------------------------------------------------
 // Models.
@@ -25,6 +25,23 @@ function getLoader() {
   draco.setDecoderPath('https://unpkg.com/three@0.169.0/examples/jsm/libs/draco/');
   loader.setDRACOLoader(draco);
   return loader;
+}
+
+/**
+ * Drop labels and other junk objects before anything measures the model.
+ *
+ * Order matters: this runs before fit(), because a floating "Text" plane is
+ * part of the bounding box, and fitting a cube-plus-label to 0.65 m makes the
+ * cube itself noticeably shorter than 0.65 m.
+ */
+function stripJunk(scene) {
+  if (!STRIP_MODEL_OBJECTS) return 0;
+  const doomed = [];
+  scene.traverse((o) => {
+    if (o !== scene && o.name && STRIP_MODEL_OBJECTS.test(o.name)) doomed.push(o);
+  });
+  for (const o of doomed) o.parent?.remove(o);
+  return doomed.length;
 }
 
 function loadOne(url) {
@@ -153,11 +170,34 @@ export function instanceScaled(slot, height) {
  * collider to match rather than guessing.
  */
 /**
+ * How far a single axis may stretch away from the uniform scale.
+ *
+ * 1.0 would be strictly uniform — correct proportions, and a cube-shaped
+ * placeholder standing in for a two-metre bed stays a small cube with a small
+ * collider. Higher lets a model fill the footprint the generator reserved, at
+ * the cost of squashing it. A third either way is not visible on furniture and
+ * is enough to close the gap on anything roughly box-shaped. Turn it down to
+ * 1.0 once every slot has a real model in it.
+ */
+export const MAX_STRETCH = 1.35;
+
+/**
  * What a model would become if asked to fit a box, without building it.
  *
  * The collider is generated before the meshes are, so the generator needs the
  * achieved size in advance — otherwise a squat model keeps the tall footprint
  * the generator invented and you collide with air above it.
+ *
+ * HEIGHT LEADS, and then the other two axes are allowed to move towards the
+ * reserved footprint. Fitting uniformly to the tightest of three axes sounds
+ * safe and makes everything tiny: a chair modelled in a 1x1x1 box asked for
+ * 0.55 wide and 0.95 tall takes the 0.55 and ends up knee-high. Height is the
+ * axis a person reads, so that sets the base scale; width and depth then
+ * stretch towards what the generator actually reserved, capped at
+ * MAX_STRETCH so nothing comes out visibly deformed.
+ *
+ * The caller rebuilds the collider from w/h/d, so whatever comes out of here,
+ * the box you walk into is the box you can see.
  */
 export function fitInfo(slot, w, h, d) {
   const entry = cache.get(slot);
@@ -165,21 +205,18 @@ export function fitInfo(slot, w, h, d) {
   const s = entry.size;
   if (s.x < 1e-4 || s.y < 1e-4 || s.z < 1e-4) return null;
 
-  // HEIGHT LEADS. Fitting to the tightest of three axes sounds safe and makes
-  // everything tiny: a chair modelled in a 1x1x1 box asked for 0.55 wide and
-  // 0.95 tall takes the 0.55 and ends up knee-high. Height is the axis a person
-  // reads, so match that, and let the footprint be whatever the model actually
-  // is — the collider is rebuilt from the result, so it still agrees with what
-  // you can see.
-  let k = h / s.y;
+  const base = h / s.y;
+  const lo = base / MAX_STRETCH, hi = base * MAX_STRETCH;
+  const kx = Math.min(hi, Math.max(lo, w / s.x));
+  const kz = Math.min(hi, Math.max(lo, d / s.z));
 
-  // The one thing worth refusing is a piece so wide it swallows the room. Cap
-  // the footprint at a generous multiple of what the generator reserved.
-  const maxFoot = Math.max(w, d) * 2.4;
-  const foot = Math.max(s.x, s.z) * k;
-  if (foot > maxFoot) k *= maxFoot / foot;
-
-  return { k, w: s.x * k, h: s.y * k, d: s.z * k };
+  return {
+    // Per axis. Callers do obj.scale.set(scale.x, scale.y, scale.z).
+    scale: { x: kx, y: base, z: kz },
+    // The uniform equivalent, for anything that still wants one number.
+    k: base,
+    w: s.x * kx, h: s.y * base, d: s.z * kz,
+  };
 }
 
 export function instanceInBox(slot, w, h, d) {
@@ -207,6 +244,10 @@ export async function loadModels(onProgress) {
       const gltf = await loadOne(spec.url);
       const scene = gltf.scene ?? gltf.scenes?.[0];
       if (!scene) throw new Error('empty gltf');
+      const stripped = stripJunk(scene);
+      if (stripped) {
+        console.info(`[models] ${slot}: dropped ${stripped} label object(s) from ${spec.url}`);
+      }
       scene.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
       const fitted = fit(scene, spec.height);
       cache.set(slot, {

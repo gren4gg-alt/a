@@ -1,241 +1,201 @@
-# Patch: black models, the Alt-while-downed overlap, in-game settings, RUN on the left
-#
-# Apply with:  git apply CHANGES.diff   (from the repo root)
-# Paths below are relative to the copies in /mnt/project; adjust the a/ b/
-# prefixes to src/ if git complains about paths.
+# Patch against the original project files.
+# src/: assets.js models.js material.js main.js ui.js settings.js   root: index.html
 
---- /mnt/project/index.html	1979-12-31 00:00:00.000000000 +0000
-+++ work/index.html	2026-09-06 02:34:12.557775017 +0000
-@@ -250,7 +250,7 @@
-   #revive-track { width: 9rem; height: 2px; background: rgba(232,185,168,0.2); }
-   #revive-bar { height: 100%; width: 0; background: var(--blood); }
+--- /mnt/project/assets.js	1979-12-31 00:00:00.000000000 +0000
++++ assets.js	2026-09-06 07:03:34.624088447 +0000
+@@ -101,3 +101,18 @@
  
--  #downed { position: fixed; inset: 0; z-index: 15; display: grid; place-content: center;
-+  #downed { position: fixed; inset: 0; z-index: 22; display: grid; place-content: center;
-             justify-items: center; gap: 0.5rem; text-align: center; pointer-events: none;
-             background: rgba(40,4,2,0.35); }
-   #downed strong { font-size: 1.45rem; font-weight: 300; letter-spacing: 0.22em; color: var(--blood); }
-@@ -318,12 +318,23 @@
-   .mg-block.picked { outline: 2px solid #8fd6ff; outline-offset: 2px; }
-   .mg-divider { width: 100%; height: 1px; background: rgba(143,214,255,0.14); }
+ /** Set false to ignore assets/models entirely and use primitives. */
+ export const USE_ASSET_MODELS = true;
++
++/**
++ * Objects to throw away as soon as a .glb is parsed.
++ *
++ * Placeholder models very often ship with a label attached — Blender's text
++ * object is called "Text" and reads "Text", and it exports along with the
++ * mesh. It floats in the room, and worse, it counts towards the model's
++ * bounding box, so the fit that scales the model to its slot height is
++ * measuring the label as well and everything comes out smaller than asked.
++ *
++ * Matched against the object's name, case-insensitively, whole name only, so
++ * "Text" and "Text.001" go and a crate called "TextureTest" stays. Set to null
++ * to keep everything.
++ */
++export const STRIP_MODEL_OBJECTS = /^(text|label|placeholder)(\.\d+)?$/i;
+--- /mnt/project/models.js	1979-12-31 00:00:00.000000000 +0000
++++ models.js	2026-09-06 07:03:43.920147654 +0000
+@@ -1,7 +1,7 @@
+ import * as THREE from 'three';
+ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+-import { MODEL_ASSETS, USE_ASSET_MODELS } from './assets.js';
++import { MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS } from './assets.js';
  
--  #fullscreen, #fullscreen-menu { position: fixed; right: 1.4rem; top: 1.2rem; z-index: 32;
-+  #fullscreen, #fullscreen-menu, #ingame-menu { position: fixed; right: 1.4rem; top: 1.2rem; z-index: 32;
-     width: 2.1rem; height: 2.1rem; display: grid; place-content: center; padding: 0;
-     border-radius: 50%; font-size: 0.9rem; line-height: 1; }
-   /* In game it must accept a click without the canvas stealing it for pointer lock. */
-   #fullscreen { pointer-events: auto; opacity: 0.45; }
-   #fullscreen:hover { opacity: 1; }
-+  /* Settings, in game, always reachable. On a phone there is no Escape key and
-+     no click-to-look prompt, so this used to be the one screen you could not
-+     get to once a run had started. Sits left of the fullscreen button. */
-+  #ingame-menu { right: 4.1rem; pointer-events: auto; opacity: 0.45; font-size: 1.05rem; }
-+  #ingame-menu:hover { opacity: 1; }
-+  @media (pointer: coarse) {
-+    /* A 2.1rem circle is under the 44px tap target every phone guideline asks
-+       for, and this one has to be hittable with a thumb mid-run. */
-+    #fullscreen, #ingame-menu { width: 2.9rem; height: 2.9rem; opacity: 0.7; }
-+    #ingame-menu { right: 5.0rem; }
+ // ---------------------------------------------------------------------------
+ // Models.
+@@ -27,6 +27,23 @@
+   return loader;
+ }
+ 
++/**
++ * Drop labels and other junk objects before anything measures the model.
++ *
++ * Order matters: this runs before fit(), because a floating "Text" plane is
++ * part of the bounding box, and fitting a cube-plus-label to 0.65 m makes the
++ * cube itself noticeably shorter than 0.65 m.
++ */
++function stripJunk(scene) {
++  if (!STRIP_MODEL_OBJECTS) return 0;
++  const doomed = [];
++  scene.traverse((o) => {
++    if (o !== scene && o.name && STRIP_MODEL_OBJECTS.test(o.name)) doomed.push(o);
++  });
++  for (const o of doomed) o.parent?.remove(o);
++  return doomed.length;
++}
++
+ function loadOne(url) {
+   return new Promise((resolve, reject) => {
+     getLoader().load(url, (gltf) => resolve(gltf), undefined, reject);
+@@ -73,6 +90,29 @@
+ const cache = new Map();
+ 
+ /**
++ * Mark a clone as belonging to the shared cache.
++ *
++ * Object3D.clone() copies the transform tree but SHARES geometry and materials
++ * with the original. A scene teardown that walks every mesh and calls
++ * geometry.dispose() therefore frees the parsed GLB itself, and the next run
++ * clones something that no longer has buffers on the GPU — which is why the
++ * furniture came back wrong on the second house and not the first. Anything
++ * carrying this flag is skipped by that teardown.
++ */
++function pool(copy) {
++  copy.userData.pooled = true;
++  return copy;
++}
++
++/** Is this object, or anything above it, a clone of a cached model? */
++export function isPooled(object) {
++  for (let o = object; o; o = o.parent) {
++    if (o.userData?.pooled) return true;
 +  }
-   #fullscreen-settings { width: auto; height: auto; position: static; border-radius: 0;
-     display: inline-block; padding: 0.55rem 1.1rem; font-size: inherit; }
- 
-@@ -629,6 +640,7 @@
- <div id="roster-hud" class="hidden"></div>
- <div id="hud-timer" class="hidden">0:00</div>
- <button class="btn quiet hidden" id="fullscreen" title="Fullscreen">&#9974;</button>
-+<button class="btn quiet hidden" id="ingame-menu" title="Settings" aria-label="Settings">&#9881;</button>
- <div id="power" class="hidden">
-   <div id="power-line"><span id="power-name">Flare</span> · <span id="power-key">Q</span></div>
-   <div id="power-track"><div id="power-fill"></div></div>
---- /mnt/project/main.js	1979-12-31 00:00:00.000000000 +0000
-+++ work/main.js	2026-09-06 02:36:50.003184457 +0000
-@@ -9,14 +9,14 @@
-   wallGeometry, floorGeometry, ceilingGeometry, propGeometry, propColliders,
- } from './build.js';
- import { createBaker } from './bake.js';
--import { createHouseMaterial, createGlowMaterial, flickerSignal } from './material.js';
-+import { createHouseMaterial, createGlowMaterial, flickerSignal, PropMaterials } from './material.js';
- import { Player, ColliderGrid, blocked } from './player.js';
- import { Visibility } from './rooms.js';
- import { Ghost } from './enemy.js';
- import { loadSurfaceTextures } from './textures.js';
- import { loadModels } from './models.js';
- import { Interactables } from './interact.js';
--import { instance as modelInstance, fitInfo, has as hasModel } from './models.js';
-+import { instance as modelInstance, fitInfo, has as hasModel, isPooled } from './models.js';
- import { startMinigame, GAME_NAMES } from './minigames.js';
- import { ceilingColliders, roomVariant } from './build.js';
- import { MenuScene } from './menuscene.js';
-@@ -57,6 +57,7 @@
-   power: $('power'), powerName: $('power-name'), powerKey: $('power-key'), powerFill: $('power-fill'),
-   talk: $('talk-indicator'),
-   prompt: $('prompt'), promptKeys: $('prompt-keys'), vignette: $('vignette'),
-+  ingameMenu: $('ingame-menu'),
-   use: $('use'), useLabel: $('use-label'), useKey: $('use-key'),
-   hiding: $('hiding'), hidingKey: $('hiding-key'),
-   door: $('door-status'), doorCount: $('door-count'),
-@@ -92,13 +93,34 @@
-   // These three were only ever toggled by gameplay, so they sat on top of the
-   // main menu: the click-to-look prompt, the door counter and the carry line.
-   el.door.classList.toggle('hidden', !inGame);
--  // There is nothing to capture on a touch device, and the prompt would just
--  // sit there telling you to click.
--  el.prompt.classList.toggle('hidden', TOUCH || !inGame || !!document.pointerLockElement);
-+  syncPrompt();
-   $('touch').classList.toggle('hidden', !TOUCH || !inGame);
-   if (TOUCH && !inGame) el.rotate.classList.add('hidden');
-   if (!inGame) el.carrying.classList.add('hidden');
-   $('fullscreen').classList.toggle('hidden', !inGame);
-+  el.ingameMenu.classList.toggle('hidden', !inGame);
++  return false;
 +}
 +
 +/**
-+ * Whether the click-to-look prompt belongs on screen.
+  * @returns {THREE.Object3D|null} a fresh clone, or null if the slot has no
+  *   model and the caller should build its primitive instead.
+  */
+@@ -81,7 +121,7 @@
+   if (!entry) return null;
+   const copy = entry.root.clone(true);
+   copy.animations = entry.animations;
+-  return copy;
++  return pool(copy);
+ }
+ 
+ /** Post-fit dimensions in metres, or null if the slot has no model. */
+@@ -116,7 +156,7 @@
+   if (!entry) return null;
+   const copy = entry.root.clone(true);
+   if (entry.size.y > 1e-4 && height) copy.scale.setScalar(height / entry.size.y);
+-  return copy;
++  return pool(copy);
+ }
+ 
+ /**
+@@ -130,11 +170,34 @@
+  * collider to match rather than guessing.
+  */
+ /**
++ * How far a single axis may stretch away from the uniform scale.
 + *
-+ * It used to be toggled from two places with two different conditions, neither
-+ * of which knew about the other overlays. Release the mouse while you are on
-+ * the floor and you got the prompt drawn straight over the knocked-out panel:
-+ * two headings, two sets of body text and the ad button underneath both of
-+ * them. One function, asked at every point the answer can change.
-+ *
-+ * Nothing to capture on a touch device, so it never shows there at all.
++ * 1.0 would be strictly uniform — correct proportions, and a cube-shaped
++ * placeholder standing in for a two-metre bed stays a small cube with a small
++ * collider. Higher lets a model fill the footprint the generator reserved, at
++ * the cost of squashing it. A third either way is not visible on furniture and
++ * is enough to close the gap on anything roughly box-shaped. Turn it down to
++ * 1.0 once every slot has a real model in it.
 + */
-+function syncPrompt() {
-+  const inGame = currentScreen === null;
-+  const locked = !!document.pointerLockElement;
-+  // Any overlay that owns the middle of the screen and has something to press.
-+  const occupied = !el.downed.classList.contains('hidden')
-+                || !el.vote.classList.contains('hidden')
-+                || !el.tv.classList.contains('hidden')
-+                || !el.board.classList.contains('hidden');
-+  el.prompt.classList.toggle('hidden', TOUCH || !inGame || locked || occupied);
- }
- 
- // Screens that sit over the diorama rather than blacking it out.
-@@ -326,12 +348,17 @@
-   run.player.releaseInput();
-   for (const r of run.remotes.values()) r.dispose(run.scene);
-   run.scene.traverse((o) => {
--    if (o.isMesh || o.isLineSegments) {
--      o.geometry?.dispose();
--      if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
--      else o.material?.dispose();
--    }
-+    if (!o.isMesh && !o.isLineSegments) return;
-+    // Clones of a cached model share their geometry with the cache. Disposing
-+    // it here freed the parsed GLB for every future run, so the second house
-+    // came up with the furniture missing or garbled. The materials on those
-+    // clones are ours and go with run.propMats below.
-+    if (isPooled(o)) return;
-+    o.geometry?.dispose();
-+    if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
-+    else o.material?.dispose();
-   });
-+  run.propMats?.dispose();
-   run = null;
- }
- 
-@@ -475,6 +502,12 @@
-     roomMeshes.set(roomId, group);
-   }
- 
-+  // Everything imported gets relit. A GLB brings a MeshStandardMaterial with
-+  // it, and there is not one light in this scene — the house is lit by a baked
-+  // vertex attribute and a shader torch — so an untouched import renders as a
-+  // black silhouette. See PropMaterials in material.js.
-+  const propMats = new PropMaterials(material);
++export const MAX_STRETCH = 1.35;
 +
-   let modelled = 0;
-   for (const p of level.props) {
-     if (!hasModel(p.kind)) continue;
-@@ -483,6 +516,7 @@
-     if (p.fitScale) obj.scale.setScalar(p.fitScale);
-     obj.position.set(p.x, p.y ?? 0, p.z);
-     obj.rotation.y = p.facing;
-+    propMats.apply(obj);
-     roomMeshes.get(p.room)?.add(obj);
-     modelled++;
-   }
-@@ -582,9 +616,7 @@
-     // all, and iOS supports neither. checkRotate() covers the failure.
-     lockLandscape().finally(checkRotate);
-   }
--  player.onLockChange = (locked) => {
--    el.prompt.classList.toggle('hidden', TOUCH || locked || currentScreen !== null);
--  };
-+  player.onLockChange = () => syncPrompt();
++/**
+  * What a model would become if asked to fit a box, without building it.
+  *
+  * The collider is generated before the meshes are, so the generator needs the
+  * achieved size in advance — otherwise a squat model keeps the tall footprint
+  * the generator invented and you collide with air above it.
++ *
++ * HEIGHT LEADS, and then the other two axes are allowed to move towards the
++ * reserved footprint. Fitting uniformly to the tightest of three axes sounds
++ * safe and makes everything tiny: a chair modelled in a 1x1x1 box asked for
++ * 0.55 wide and 0.95 tall takes the 0.55 and ends up knee-high. Height is the
++ * axis a person reads, so that sets the base scale; width and depth then
++ * stretch towards what the generator actually reserved, capped at
++ * MAX_STRETCH so nothing comes out visibly deformed.
++ *
++ * The caller rebuilds the collider from w/h/d, so whatever comes out of here,
++ * the box you walk into is the box you can see.
+  */
+ export function fitInfo(slot, w, h, d) {
+   const entry = cache.get(slot);
+@@ -142,21 +205,18 @@
+   const s = entry.size;
+   if (s.x < 1e-4 || s.y < 1e-4 || s.z < 1e-4) return null;
  
-   material.uniforms.uFlashRange.value *= loadout.stats.flashlightRange;
- 
-@@ -599,6 +631,10 @@
-   for (const p of session.roster) {
-     if (p.id === session.localId) continue;
-     const r = new RemotePlayer(scene, p.id, p.name, rosterIndex(p.id), !isHost(), p.char);
-+    // Same reason as the furniture: a teammate wearing a supplied model was a
-+    // person-shaped hole in the dark. The capsule fallback is already self-lit,
-+    // so only the modelled ones need this.
-+    if (r.usesModel) propMats.apply(r.mesh);
-     const lo = new Loadout(characterById(p.char ?? DEFAULT_CHARACTER));
-     r.loudness = lo.stats.loudnessScale;
-     r.knifeDodge = lo.stats.knifeDodge;
-@@ -635,7 +671,7 @@
-   vis.update(player.pos.x, player.pos.z);
- 
-   run = {
--    difficulty, level, scene, material, player, remotes, ghosts, vis, grid,
-+    difficulty, level, scene, material, propMats, player, remotes, ghosts, vis, grid,
-     loadout, loadouts, interact, lootItems, lootMat, beadMat, exitMat, exitRoom, pillar,
-     carrying: null, minigame: null, busyTerminals: new Map(), useTarget: null,
-     sheltered: null,
-@@ -1131,6 +1167,7 @@
-   if (run.boardOpen) closeBoard();
-   audio.hit();
-   el.downed.classList.remove('hidden');
-+  syncPrompt();
-   el.downedTimer.textContent = String(Math.ceil(
-     run.downTimers.get(session.localId) ?? CONFIG.bleedOutSeconds,
-   ));
-@@ -1157,6 +1194,7 @@
- function applyReviveLocal() {
-   run.player.downed = false;
-   el.downed.classList.add('hidden');
-+  syncPrompt();
+-  // HEIGHT LEADS. Fitting to the tightest of three axes sounds safe and makes
+-  // everything tiny: a chair modelled in a 1x1x1 box asked for 0.55 wide and
+-  // 0.95 tall takes the 0.55 and ends up knee-high. Height is the axis a person
+-  // reads, so match that, and let the footprint be whatever the model actually
+-  // is — the collider is rebuilt from the result, so it still agrees with what
+-  // you can see.
+-  let k = h / s.y;
+-
+-  // The one thing worth refusing is a piece so wide it swallows the room. Cap
+-  // the footprint at a generous multiple of what the generator reserved.
+-  const maxFoot = Math.max(w, d) * 2.4;
+-  const foot = Math.max(s.x, s.z) * k;
+-  if (foot > maxFoot) k *= maxFoot / foot;
+-
+-  return { k, w: s.x * k, h: s.y * k, d: s.z * k };
++  const base = h / s.y;
++  const lo = base / MAX_STRETCH, hi = base * MAX_STRETCH;
++  const kx = Math.min(hi, Math.max(lo, w / s.x));
++  const kz = Math.min(hi, Math.max(lo, d / s.z));
++
++  return {
++    // Per axis. Callers do obj.scale.set(scale.x, scale.y, scale.z).
++    scale: { x: kx, y: base, z: kz },
++    // The uniform equivalent, for anything that still wants one number.
++    k: base,
++    w: s.x * kx, h: s.y * base, d: s.z * kz,
++  };
  }
  
- // ---------------------------------------------------------------------------
-@@ -1374,6 +1412,12 @@
-   lastFrame = now;
-   run.time += dt;
+ export function instanceInBox(slot, w, h, d) {
+@@ -167,7 +227,7 @@
+   const k = Math.min(w / s.x, h / s.y, d / s.z);
+   const copy = entry.root.clone(true);
+   copy.scale.setScalar(k);
+-  return { object: copy, w: s.x * k, h: s.y * k, d: s.z * k };
++  return { object: pool(copy), w: s.x * k, h: s.y * k, d: s.z * k };
+ }
  
-+  // Four classList reads a frame, and in exchange the click-to-look prompt can
-+  // never again be left showing on top of an overlay that opened without
-+  // remembering to tell it. Every overlay in the game opens from somewhere
-+  // different; this is the one place that sees all of them.
-+  syncPrompt();
-+
-   if (!run.over && run.begun) {
-     accumulator += dt;
-     let steps = 0;
-@@ -2478,6 +2522,16 @@
-   settingsUI.openTab('controls');
-   show('settings');
- });
-+// The same door, but always on screen. The prompt one only exists on desktop
-+// and only while the mouse is free, so on a phone — no Escape key, no prompt —
-+// settings were unreachable from the moment a run started, which also meant
-+// the on-screen controls could not be moved without quitting to the menu.
-+el.ingameMenu.addEventListener('click', (e) => {
-+  e.stopPropagation();
-+  if (!run || run.over) return;
-+  settingsUI.openTab(TOUCH ? 'controls' : 'graphics');
-+  show('settings');
-+});
- $('about-back').addEventListener('click', () => buildMenu());
- $('mp-back').addEventListener('click', () => buildMenu());
- $('modes-back').addEventListener('click', () => (isNet() ? renderSelect() : buildMenu()));
+ export function animationsFor(slot) { return cache.get(slot)?.animations ?? []; }
+@@ -184,6 +244,10 @@
+       const gltf = await loadOne(spec.url);
+       const scene = gltf.scene ?? gltf.scenes?.[0];
+       if (!scene) throw new Error('empty gltf');
++      const stripped = stripJunk(scene);
++      if (stripped) {
++        console.info(`[models] ${slot}: dropped ${stripped} label object(s) from ${spec.url}`);
++      }
+       scene.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
+       const fitted = fit(scene, spec.height);
+       cache.set(slot, {
 --- /mnt/project/material.js	1979-12-31 00:00:00.000000000 +0000
-+++ work/material.js	2026-09-06 02:35:29.486754554 +0000
++++ material.js	2026-09-06 02:35:29.486754554 +0000
 @@ -355,3 +355,183 @@
      `,
    });
@@ -420,67 +380,455 @@
 +    this.cache.clear();
 +  }
 +}
---- /mnt/project/models.js	1979-12-31 00:00:00.000000000 +0000
-+++ work/models.js	2026-09-06 02:35:41.093396433 +0000
-@@ -73,6 +73,29 @@
- const cache = new Map();
- 
- /**
-+ * Mark a clone as belonging to the shared cache.
-+ *
-+ * Object3D.clone() copies the transform tree but SHARES geometry and materials
-+ * with the original. A scene teardown that walks every mesh and calls
-+ * geometry.dispose() therefore frees the parsed GLB itself, and the next run
-+ * clones something that no longer has buffers on the GPU — which is why the
-+ * furniture came back wrong on the second house and not the first. Anything
-+ * carrying this flag is skipped by that teardown.
-+ */
-+function pool(copy) {
-+  copy.userData.pooled = true;
-+  return copy;
-+}
-+
-+/** Is this object, or anything above it, a clone of a cached model? */
-+export function isPooled(object) {
-+  for (let o = object; o; o = o.parent) {
-+    if (o.userData?.pooled) return true;
-+  }
-+  return false;
+--- /mnt/project/main.js	1979-12-31 00:00:00.000000000 +0000
++++ main.js	2026-09-06 07:05:56.448880786 +0000
+@@ -9,14 +9,14 @@
+   wallGeometry, floorGeometry, ceilingGeometry, propGeometry, propColliders,
+ } from './build.js';
+ import { createBaker } from './bake.js';
+-import { createHouseMaterial, createGlowMaterial, flickerSignal } from './material.js';
++import { createHouseMaterial, createGlowMaterial, flickerSignal, PropMaterials } from './material.js';
+ import { Player, ColliderGrid, blocked } from './player.js';
+ import { Visibility } from './rooms.js';
+ import { Ghost } from './enemy.js';
+ import { loadSurfaceTextures } from './textures.js';
+ import { loadModels } from './models.js';
+ import { Interactables } from './interact.js';
+-import { instance as modelInstance, fitInfo, has as hasModel } from './models.js';
++import { instance as modelInstance, fitInfo, has as hasModel, isPooled } from './models.js';
+ import { startMinigame, GAME_NAMES } from './minigames.js';
+ import { ceilingColliders, roomVariant } from './build.js';
+ import { MenuScene } from './menuscene.js';
+@@ -57,6 +57,7 @@
+   power: $('power'), powerName: $('power-name'), powerKey: $('power-key'), powerFill: $('power-fill'),
+   talk: $('talk-indicator'),
+   prompt: $('prompt'), promptKeys: $('prompt-keys'), vignette: $('vignette'),
++  ingameMenu: $('ingame-menu'),
+   use: $('use'), useLabel: $('use-label'), useKey: $('use-key'),
+   hiding: $('hiding'), hidingKey: $('hiding-key'),
+   door: $('door-status'), doorCount: $('door-count'),
+@@ -71,6 +72,7 @@
+   vote: $('vote'), voteList: $('vote-list'), voteTimer: $('vote-timer'),
+   giveUp: $('give-up'),
+   touchEdit: $('touch-edit'), teWhich: $('te-which'), rotate: $('rotate'),
++  touchFirst: $('touch-first'), teDone: $('te-done'),
+   voteWatch: $('vote-watch'), voteQuit: $('vote-quit'),
+   carrying: $('carrying'), carryingName: $('carrying-name'),
+   downed: $('downed'), downedTimer: $('downed-timer'), downedNote: $('downed-note'),
+@@ -92,13 +94,34 @@
+   // These three were only ever toggled by gameplay, so they sat on top of the
+   // main menu: the click-to-look prompt, the door counter and the carry line.
+   el.door.classList.toggle('hidden', !inGame);
+-  // There is nothing to capture on a touch device, and the prompt would just
+-  // sit there telling you to click.
+-  el.prompt.classList.toggle('hidden', TOUCH || !inGame || !!document.pointerLockElement);
++  syncPrompt();
+   $('touch').classList.toggle('hidden', !TOUCH || !inGame);
+   if (TOUCH && !inGame) el.rotate.classList.add('hidden');
+   if (!inGame) el.carrying.classList.add('hidden');
+   $('fullscreen').classList.toggle('hidden', !inGame);
++  el.ingameMenu.classList.toggle('hidden', !inGame);
 +}
 +
 +/**
-  * @returns {THREE.Object3D|null} a fresh clone, or null if the slot has no
-  *   model and the caller should build its primitive instead.
-  */
-@@ -81,7 +104,7 @@
-   if (!entry) return null;
-   const copy = entry.root.clone(true);
-   copy.animations = entry.animations;
--  return copy;
-+  return pool(copy);
++ * Whether the click-to-look prompt belongs on screen.
++ *
++ * It used to be toggled from two places with two different conditions, neither
++ * of which knew about the other overlays. Release the mouse while you are on
++ * the floor and you got the prompt drawn straight over the knocked-out panel:
++ * two headings, two sets of body text and the ad button underneath both of
++ * them. One function, asked at every point the answer can change.
++ *
++ * Nothing to capture on a touch device, so it never shows there at all.
++ */
++function syncPrompt() {
++  const inGame = currentScreen === null;
++  const locked = !!document.pointerLockElement;
++  // Any overlay that owns the middle of the screen and has something to press.
++  const occupied = !el.downed.classList.contains('hidden')
++                || !el.vote.classList.contains('hidden')
++                || !el.tv.classList.contains('hidden')
++                || !el.board.classList.contains('hidden');
++  el.prompt.classList.toggle('hidden', TOUCH || !inGame || locked || occupied);
  }
  
- /** Post-fit dimensions in metres, or null if the slot has no model. */
-@@ -116,7 +139,7 @@
-   if (!entry) return null;
-   const copy = entry.root.clone(true);
-   if (entry.size.y > 1e-4 && height) copy.scale.setScalar(height / entry.size.y);
--  return copy;
-+  return pool(copy);
+ // Screens that sit over the diorama rather than blacking it out.
+@@ -319,6 +342,9 @@
+ 
+ function disposeRun() {
+   if (!run) return;
++  // Leaving mid-edit — from the menu button, a disconnect, a crash — would
++  // otherwise strand the editor panel on top of the main menu.
++  if (!el.touchEdit.classList.contains('hidden')) closeTouchEditor();
+   touchControls?.detach();
+   if (TOUCH) { unlockOrientation(); el.rotate.classList.add('hidden'); }
+   closeBoard();
+@@ -326,12 +352,17 @@
+   run.player.releaseInput();
+   for (const r of run.remotes.values()) r.dispose(run.scene);
+   run.scene.traverse((o) => {
+-    if (o.isMesh || o.isLineSegments) {
+-      o.geometry?.dispose();
+-      if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
+-      else o.material?.dispose();
+-    }
++    if (!o.isMesh && !o.isLineSegments) return;
++    // Clones of a cached model share their geometry with the cache. Disposing
++    // it here freed the parsed GLB for every future run, so the second house
++    // came up with the furniture missing or garbled. The materials on those
++    // clones are ours and go with run.propMats below.
++    if (isPooled(o)) return;
++    o.geometry?.dispose();
++    if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
++    else o.material?.dispose();
+   });
++  run.propMats?.dispose();
+   run = null;
  }
  
- /**
-@@ -167,7 +190,7 @@
-   const k = Math.min(w / s.x, h / s.y, d / s.z);
-   const copy = entry.root.clone(true);
-   copy.scale.setScalar(k);
--  return { object: copy, w: s.x * k, h: s.y * k, d: s.z * k };
-+  return { object: pool(copy), w: s.x * k, h: s.y * k, d: s.z * k };
+@@ -475,29 +506,46 @@
+     roomMeshes.set(roomId, group);
+   }
+ 
++  // Match every prop's footprint to the model that will actually stand there.
++  //
++  // THIS HAS TO HAPPEN FIRST. It used to run after the loop below, which read
++  // p.fitScale to size the mesh — and p.fitScale did not exist yet. Every
++  // model was therefore drawn at its default height from MODEL_ASSETS while
++  // the collider was rebuilt from the fitted size, so nothing agreed with its
++  // own hitbox: crates in a stack intersected each other, and a chair the
++  // generator had reserved a wide footprint for was drawn small inside it.
++  //
++  // Supplied models come at all sorts of proportions, so the fit is per axis
++  // (see fitInfo) and the collider below is rebuilt from what it returns. The
++  // box you walk into is the box you can see.
++  for (const pr of level.props) {
++    if (!hasModel(pr.kind)) continue;
++    const f = fitInfo(pr.kind, pr.w, pr.h, pr.d);
++    if (!f) continue;
++    pr.w = f.w; pr.h = f.h; pr.d = f.d; pr.fitScale = f.scale;
++  }
++
++  // Everything imported gets relit. A GLB brings a MeshStandardMaterial with
++  // it, and there is not one light in this scene — the house is lit by a baked
++  // vertex attribute and a shader torch — so an untouched import renders as a
++  // black silhouette. See PropMaterials in material.js.
++  const propMats = new PropMaterials(material);
++
+   let modelled = 0;
+   for (const p of level.props) {
+     if (!hasModel(p.kind)) continue;
+     const obj = modelInstance(p.kind);
+     if (!obj) continue;
+-    if (p.fitScale) obj.scale.setScalar(p.fitScale);
++    if (p.fitScale) obj.scale.set(p.fitScale.x, p.fitScale.y, p.fitScale.z);
++    // p.y is the BASE of the prop, and fit() already sat the model's feet on
++    // its own origin, so these two agree without an offset.
+     obj.position.set(p.x, p.y ?? 0, p.z);
+     obj.rotation.y = p.facing;
++    propMats.apply(obj);
+     roomMeshes.get(p.room)?.add(obj);
+     modelled++;
+   }
+ 
+-  // Match every prop's footprint to the model that will actually stand there,
+-  // BEFORE the colliders are built from it. Supplied models come at all sorts
+-  // of proportions; scaling only by height leaves a wide chair sticking out of
+-  // its collider and a squat crate with a metre of solid air on top.
+-  for (const pr of level.props) {
+-    if (!hasModel(pr.kind)) continue;
+-    const f = fitInfo(pr.kind, pr.w, pr.h, pr.d);
+-    if (!f) continue;
+-    pr.w = f.w; pr.h = f.h; pr.d = f.d; pr.fitScale = f.k;
+-  }
+-
+   const interact = new Interactables(scene, level);
+   const grid = new ColliderGrid([
+     ...buildColliders(wallBoxes),
+@@ -582,9 +630,7 @@
+     // all, and iOS supports neither. checkRotate() covers the failure.
+     lockLandscape().finally(checkRotate);
+   }
+-  player.onLockChange = (locked) => {
+-    el.prompt.classList.toggle('hidden', TOUCH || locked || currentScreen !== null);
+-  };
++  player.onLockChange = () => syncPrompt();
+ 
+   material.uniforms.uFlashRange.value *= loadout.stats.flashlightRange;
+ 
+@@ -599,6 +645,10 @@
+   for (const p of session.roster) {
+     if (p.id === session.localId) continue;
+     const r = new RemotePlayer(scene, p.id, p.name, rosterIndex(p.id), !isHost(), p.char);
++    // Same reason as the furniture: a teammate wearing a supplied model was a
++    // person-shaped hole in the dark. The capsule fallback is already self-lit,
++    // so only the modelled ones need this.
++    if (r.usesModel) propMats.apply(r.mesh);
+     const lo = new Loadout(characterById(p.char ?? DEFAULT_CHARACTER));
+     r.loudness = lo.stats.loudnessScale;
+     r.knifeDodge = lo.stats.knifeDodge;
+@@ -635,7 +685,7 @@
+   vis.update(player.pos.x, player.pos.z);
+ 
+   run = {
+-    difficulty, level, scene, material, player, remotes, ghosts, vis, grid,
++    difficulty, level, scene, material, propMats, player, remotes, ghosts, vis, grid,
+     loadout, loadouts, interact, lootItems, lootMat, beadMat, exitMat, exitRoom, pillar,
+     carrying: null, minigame: null, busyTerminals: new Map(), useTarget: null,
+     sheltered: null,
+@@ -674,6 +724,8 @@
+     show(null);
+     lastFrame = performance.now();
+     rafId = requestAnimationFrame(frame);
++    // After show(null), so the touch buttons are already on screen to drag.
++    maybeFirstRunLayout();
+   }, isNet() ? 200 : 450);
  }
  
- export function animationsFor(slot) { return cache.get(slot)?.animations ?? []; }
+@@ -1131,6 +1183,7 @@
+   if (run.boardOpen) closeBoard();
+   audio.hit();
+   el.downed.classList.remove('hidden');
++  syncPrompt();
+   el.downedTimer.textContent = String(Math.ceil(
+     run.downTimers.get(session.localId) ?? CONFIG.bleedOutSeconds,
+   ));
+@@ -1157,6 +1210,7 @@
+ function applyReviveLocal() {
+   run.player.downed = false;
+   el.downed.classList.add('hidden');
++  syncPrompt();
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -1374,6 +1428,12 @@
+   lastFrame = now;
+   run.time += dt;
+ 
++  // Four classList reads a frame, and in exchange the click-to-look prompt can
++  // never again be left showing on top of an overlay that opened without
++  // remembering to tell it. Every overlay in the game opens from somewhere
++  // different; this is the one place that sees all of them.
++  syncPrompt();
++
+   if (!run.over && run.begun) {
+     accumulator += dt;
+     let steps = 0;
+@@ -2435,6 +2495,9 @@
+   isTouch: TOUCH,
+   onChange: () => { applyGraphics(); applyAudio(); if (run) el.promptKeys.innerHTML = promptText(); },
+   onTest: (key) => { audio.resume(); if (key === 'sfx' || key === 'master') audio.pickup(60); },
++  // The store has already been reset by the time this fires; the live buttons
++  // have not, and they are sitting behind the settings screen waiting.
++  onTouchReset: () => touchControls?.applyLayout(),
+ });
+ 
+ $('go-solo').addEventListener('click', () => {
+@@ -2478,6 +2541,16 @@
+   settingsUI.openTab('controls');
+   show('settings');
+ });
++// The same door, but always on screen. The prompt one only exists on desktop
++// and only while the mouse is free, so on a phone — no Escape key, no prompt —
++// settings were unreachable from the moment a run started, which also meant
++// the on-screen controls could not be moved without quitting to the menu.
++el.ingameMenu.addEventListener('click', (e) => {
++  e.stopPropagation();
++  if (!run || run.over) return;
++  settingsUI.openTab(TOUCH ? 'controls' : 'graphics');
++  show('settings');
++});
+ $('about-back').addEventListener('click', () => buildMenu());
+ $('mp-back').addEventListener('click', () => buildMenu());
+ $('modes-back').addEventListener('click', () => (isNet() ? renderSelect() : buildMenu()));
+@@ -2629,8 +2702,13 @@
+ // Moving the on-screen controls
+ // ---------------------------------------------------------------------------
+ 
+-function openTouchEditor() {
++// True while the editor is standing in for a screen rather than sitting on top
++// of one, i.e. the walkthrough the first house on a phone opens with.
++let touchFirstRun = false;
++
++function openTouchEditor({ firstRun = false } = {}) {
+   if (!TOUCH) return;
++  touchFirstRun = firstRun;
+   touchControls = touchControls ?? new TouchControls($('touch'));
+   touchControls.applyLayout();
+   touchControls.setEditMode(true);
+@@ -2641,17 +2719,66 @@
+   };
+   $('touch').classList.remove('hidden');
+   el.touchEdit.classList.remove('hidden');
+-  el.teWhich.textContent = 'Nothing selected';
+-  syncTouchSliders();
++  el.touchEdit.classList.toggle('first-run', firstRun);
++  el.touchFirst.classList.toggle('hidden', !firstRun);
++  el.teDone.textContent = firstRun ? 'Save and play' : 'Done';
++  el.teWhich.textContent = firstRun ? 'Drag a button to move it' : 'Nothing selected';
++  // These live at z-index 32, under a #touch-first that passes taps straight
++  // through on purpose. Leaving them there means a thumb reaching for a
++  // control it is about to move opens fullscreen instead.
++  el.ingameMenu.classList.add('hidden');
++  $('fullscreen').classList.add('hidden');
++
++  // Nothing should be hunting them while they arrange their thumbs. Solo can
++  // simply stop; multiplayer cannot, because a pause nobody else shares is
++  // just a way to get killed reading a slider, so there the house keeps going
++  // and the walkthrough is something they can dismiss in two taps.
++  if (firstRun && run && !run.over && !isNet()) {
++    run.frozenForLayout = true;
++    run.begun = false;
++  }
+ }
+ 
+ function closeTouchEditor() {
+   touchControls?.setEditMode(false);
+   el.touchEdit.classList.add('hidden');
++  el.touchEdit.classList.remove('first-run');
++  el.touchFirst.classList.add('hidden');
++  el.teDone.textContent = 'Done';
+   $('touch').classList.toggle('hidden', !(TOUCH && currentScreen === null));
++  const playing = currentScreen === null && run && !run.over;
++  el.ingameMenu.classList.toggle('hidden', !playing);
++  $('fullscreen').classList.toggle('hidden', !playing);
++
++  if (touchFirstRun) {
++    // Asked once, whether or not they moved anything. Somebody happy with the
++    // defaults has still made a choice.
++    settings.data.touch.layoutChosen = true;
++    touchFirstRun = false;
++  }
++  if (run && run.frozenForLayout) {
++    run.frozenForLayout = false;
++    run.begun = true;
++    // The clock has been stopped for however long they spent in here. Without
++    // this the next frame integrates the whole of it in one step.
++    lastFrame = performance.now();
++  }
+   settings.save();
+ }
+ 
++/**
++ * The first house on a phone opens with the buttons in your hands.
++ *
++ * Every mobile game does this and for the same reason: a layout that suits one
++ * pair of thumbs suits nobody else's, and the only moment a player can judge
++ * it is with the real buttons over the real room. Asked once, then never
++ * again — the flag lives in settings, so it survives a reload.
++ */
++function maybeFirstRunLayout() {
++  if (!TOUCH || settings.data.touch.layoutChosen) return;
++  openTouchEditor({ firstRun: true });
++}
++
+ function syncTouchSliders() {
+   const t = settings.data.touch;
+   $('te-scale').value = String(Math.round(t.scale * 100));
+--- /mnt/project/ui.js	1979-12-31 00:00:00.000000000 +0000
++++ ui.js	2026-09-06 07:04:42.197157038 +0000
+@@ -10,12 +10,19 @@
+ 
+ const $ = (id) => document.getElementById(id);
+ 
+-export function buildSettingsUI({ onChange, onTest, isTouch = false }) {
++export function buildSettingsUI({ onChange, onTest, onTouchReset, isTouch = false }) {
+   const tabs = [...document.querySelectorAll('#settings-tabs [data-tab]')];
+   const panels = {
+     audio: $('tab-audio'), controls: $('tab-controls'), graphics: $('tab-graphics'),
+   };
+ 
++  // Only ever one of these on screen. A phone has no keys to rebind and no
++  // mouse to slow down; a desktop has no thumbs to reposition. Decided once,
++  // here, from the same isTouch the rest of the game uses.
++  $('controls-pc').classList.toggle('hidden', isTouch);
++  $('controls-touch').classList.toggle('hidden', !isTouch);
++  $('tab-controls-btn').textContent = isTouch ? 'Controls' : 'Keys & mouse';
++
+   function openTab(name) {
+     for (const t of tabs) t.classList.toggle('active', t.dataset.tab === name);
+     for (const [k, p] of Object.entries(panels)) p.classList.toggle('hidden', k !== name);
+@@ -129,8 +136,6 @@
+ 
+   const touchSens = $('touch-sensitivity');
+   const touchSensOut = $('touch-sensitivity-value');
+-  const touchRow = $('touch-sensitivity-row');
+-  touchRow.classList.toggle('hidden', !isTouch);
+   touchSens.value = String(Math.round((settings.data.input.touchSensitivity ?? 5) * 10));
+   touchSensOut.textContent = (Number(touchSens.value) / 10).toFixed(1);
+   touchSens.addEventListener('input', () => {
+@@ -139,20 +144,29 @@
+     settings.save();
+   });
+ 
+-  const invert = $('invert-y');
+-  invert.checked = settings.data.input.invertY;
+-  invert.addEventListener('change', () => {
+-    settings.data.input.invertY = invert.checked;
+-    settings.save();
+-  });
++  // Invert-look and crouch-toggle are the same two settings on both devices,
++  // but they are worded for the device you are holding — "invert vertical
++  // look" means nothing to somebody dragging a thumb. One checkbox each per
++  // panel, both writing the same value, and both kept in step so switching
++  // device on the same profile never shows a stale tick.
++  const inverts = [$('invert-y'), $('invert-y-touch')];
++  for (const box of inverts) {
++    box.addEventListener('change', () => {
++      settings.data.input.invertY = box.checked;
++      for (const other of inverts) other.checked = box.checked;
++      settings.save();
++    });
++  }
+ 
+-  const crouchToggle = $('crouch-toggle');
+-  crouchToggle.checked = settings.data.input.crouchToggle;
+-  crouchToggle.addEventListener('change', () => {
+-    settings.data.input.crouchToggle = crouchToggle.checked;
+-    settings.save();
+-    onChange?.();
+-  });
++  const crouchToggles = [$('crouch-toggle'), $('crouch-toggle-touch')];
++  for (const box of crouchToggles) {
++    box.addEventListener('change', () => {
++      settings.data.input.crouchToggle = box.checked;
++      for (const other of crouchToggles) other.checked = box.checked;
++      settings.save();
++      onChange?.();
++    });
++  }
+ 
+   $('reset-binds').addEventListener('click', () => {
+     for (const b of BINDABLE) settings.data.binds[b.id] = b.def;
+@@ -161,6 +175,15 @@
+     onChange?.();
+   });
+ 
++  // The touch equivalent. Deliberately not the same button: on a phone
++  // "reset keys to defaults" is offering to fix something you cannot see.
++  $('reset-touch').addEventListener('click', () => {
++    settings.resetTouchLayout();
++    onTouchReset?.();
++    refresh();
++    onChange?.();
++  });
++
+   // -- graphics ------------------------------------------------------------
+ 
+   const qList = $('quality-list');
+@@ -213,8 +236,8 @@
+     touchSensOut.textContent = (Number(touchSens.value) / 10).toFixed(1);
+     sens.value = String(Math.round(settings.data.input.sensitivity * 10));
+     sensOut.textContent = settings.data.input.sensitivity.toFixed(1);
+-    invert.checked = settings.data.input.invertY;
+-    crouchToggle.checked = settings.data.input.crouchToggle;
++    for (const box of inverts) box.checked = settings.data.input.invertY;
++    for (const box of crouchToggles) box.checked = settings.data.input.crouchToggle;
+     fov.value = String(settings.data.graphics.fov);
+     fovOut.textContent = `${fov.value}°`;
+     renderBinds();
 --- /mnt/project/settings.js	1979-12-31 00:00:00.000000000 +0000
-+++ work/settings.js	2026-09-06 02:34:37.770750700 +0000
++++ settings.js	2026-09-06 07:05:12.628674116 +0000
 @@ -43,16 +43,31 @@
   * can reach the corners of.
   */
@@ -518,17 +866,21 @@
  /** Order here is the order they appear in the controls screen. */
  export const BINDABLE = [
    { id: 'forward',    label: 'Walk forward',     def: 'KeyW' },
-@@ -93,6 +108,9 @@
+@@ -93,6 +108,13 @@
    binds: Object.fromEntries(BINDABLE.map((b) => [b.id, b.def])),
    touch: {
      layout: JSON.parse(JSON.stringify(TOUCH_DEFAULTS)),
 +    // 1, not TOUCH_LAYOUT_VERSION: a save from before this key existed leaves
 +    // the default in place, and the mismatch is exactly the signal we want.
 +    layoutVersion: 1,
++    // Whether they have ever been shown the arrange-your-buttons screen. Not
++    // "have they moved anything" — someone who is happy with the defaults
++    // should still only be asked once.
++    layoutChosen: false,
      scale: 1.0,
      opacity: 0.45,
      stickSize: 132,
-@@ -125,6 +143,11 @@
+@@ -125,6 +147,11 @@
        // missing a key still boots with a sane value for it.
        if (raw) deepMerge(this.data, JSON.parse(raw));
      } catch { /* defaults */ }
@@ -540,7 +892,7 @@
    }
  
    save() {
-@@ -136,11 +159,13 @@
+@@ -136,11 +163,16 @@
  
    reset() {
      this.data = DEFAULTS();
@@ -551,6 +903,162 @@
    resetTouchLayout() {
      this.data.touch.layout = JSON.parse(JSON.stringify(TOUCH_DEFAULTS));
 +    this.data.touch.layoutVersion = TOUCH_LAYOUT_VERSION;
++    // Deliberately NOT clearing layoutChosen. Somebody who reset from the
++    // settings screen is already in the editor's world and does not need the
++    // first-run walkthrough thrown at them next time they load a house.
      this.data.touch.scale = 1.0;
      this.data.touch.opacity = 0.45;
      this.data.touch.stickSize = 132;
+--- /mnt/project/index.html	1979-12-31 00:00:00.000000000 +0000
++++ index.html	2026-09-06 07:05:03.415932405 +0000
+@@ -250,7 +250,7 @@
+   #revive-track { width: 9rem; height: 2px; background: rgba(232,185,168,0.2); }
+   #revive-bar { height: 100%; width: 0; background: var(--blood); }
+ 
+-  #downed { position: fixed; inset: 0; z-index: 15; display: grid; place-content: center;
++  #downed { position: fixed; inset: 0; z-index: 22; display: grid; place-content: center;
+             justify-items: center; gap: 0.5rem; text-align: center; pointer-events: none;
+             background: rgba(40,4,2,0.35); }
+   #downed strong { font-size: 1.45rem; font-weight: 300; letter-spacing: 0.22em; color: var(--blood); }
+@@ -318,12 +318,23 @@
+   .mg-block.picked { outline: 2px solid #8fd6ff; outline-offset: 2px; }
+   .mg-divider { width: 100%; height: 1px; background: rgba(143,214,255,0.14); }
+ 
+-  #fullscreen, #fullscreen-menu { position: fixed; right: 1.4rem; top: 1.2rem; z-index: 32;
++  #fullscreen, #fullscreen-menu, #ingame-menu { position: fixed; right: 1.4rem; top: 1.2rem; z-index: 32;
+     width: 2.1rem; height: 2.1rem; display: grid; place-content: center; padding: 0;
+     border-radius: 50%; font-size: 0.9rem; line-height: 1; }
+   /* In game it must accept a click without the canvas stealing it for pointer lock. */
+   #fullscreen { pointer-events: auto; opacity: 0.45; }
+   #fullscreen:hover { opacity: 1; }
++  /* Settings, in game, always reachable. On a phone there is no Escape key and
++     no click-to-look prompt, so this used to be the one screen you could not
++     get to once a run had started. Sits left of the fullscreen button. */
++  #ingame-menu { right: 4.1rem; pointer-events: auto; opacity: 0.45; font-size: 1.05rem; }
++  #ingame-menu:hover { opacity: 1; }
++  @media (pointer: coarse) {
++    /* A 2.1rem circle is under the 44px tap target every phone guideline asks
++       for, and this one has to be hittable with a thumb mid-run. */
++    #fullscreen, #ingame-menu { width: 2.9rem; height: 2.9rem; opacity: 0.7; }
++    #ingame-menu { right: 5.0rem; }
++  }
+   #fullscreen-settings { width: auto; height: auto; position: static; border-radius: 0;
+     display: inline-block; padding: 0.55rem 1.1rem; font-size: inherit; }
+ 
+@@ -472,6 +483,20 @@
+   #te-which { color: var(--exit); font-size: 0.8rem; min-height: 1.1em; }
+   #te-buttons { display: flex; gap: 0.5rem; }
+ 
++  /* ---- first run on a phone ---- */
++  #touch-first { position: fixed; inset: 0; z-index: 33; pointer-events: none;
++                 display: grid; align-content: start; justify-items: center;
++                 padding: 1.1rem 1rem 0;
++                 background: linear-gradient(to bottom, rgba(2,4,7,0.86) 0%,
++                             rgba(2,4,7,0.55) 34%, rgba(2,4,7,0) 62%); }
++  #tf-card { max-width: min(30rem, 92vw); text-align: center; display: grid; gap: 0.4rem; }
++  #tf-card h2 { font-size: 1rem; letter-spacing: 0.1em; color: var(--ember); }
++  #tf-card p { line-height: 1.5; }
++  /* The editor panel is a corner tool normally. On the first run it is the
++     screen, so it goes to the bottom where a thumb can already reach. */
++  #touch-edit.first-run { top: auto; bottom: 1rem; left: 50%; transform: translateX(-50%);
++                          width: min(24rem, 92vw); }
++
+   /* ---- turn the phone ---- */
+   #rotate { position: fixed; inset: 0; z-index: 45; background: var(--void);
+             display: grid; place-content: center; justify-items: center; gap: 1rem;
+@@ -581,6 +606,21 @@
+ </div>
+ <div id="touch" class="hidden"></div>
+ 
++<!--
++  Shown once, the first time somebody plays on a phone, over the real buttons
++  in the real room. Pointer-events off throughout: every tap and drag has to
++  reach the buttons underneath, which is the entire point of the screen.
++-->
++<div id="touch-first" class="hidden">
++  <div id="tf-card">
++    <h2>Put the controls where your thumbs are</h2>
++    <p class="fine">
++      Drag any button to move it. Tap one to pick it, then use the sliders to
++      resize it. Nothing is chasing you yet.
++    </p>
++  </div>
++</div>
++
+ <div id="touch-edit" class="hidden">
+   <h2>Move the controls</h2>
+   <p>Drag any button where you want it. Tap one to resize just that button.</p>
+@@ -629,6 +669,7 @@
+ <div id="roster-hud" class="hidden"></div>
+ <div id="hud-timer" class="hidden">0:00</div>
+ <button class="btn quiet hidden" id="fullscreen" title="Fullscreen">&#9974;</button>
++<button class="btn quiet hidden" id="ingame-menu" title="Settings" aria-label="Settings">&#9881;</button>
+ <div id="power" class="hidden">
+   <div id="power-line"><span id="power-name">Flare</span> · <span id="power-key">Q</span></div>
+   <div id="power-track"><div id="power-fill"></div></div>
+@@ -807,7 +848,7 @@
+   <h1>Settings</h1>
+   <div id="settings-tabs">
+     <button data-tab="audio" class="active">Audio</button>
+-    <button data-tab="controls">Controls</button>
++    <button data-tab="controls" id="tab-controls-btn">Controls</button>
+     <button data-tab="graphics">Graphics</button>
+   </div>
+ 
+@@ -839,20 +880,44 @@
+     </p>
+   </div>
+ 
++  <!--
++    Two control panels, one per input device, and you only ever see the one you
++    are playing on. A phone has no keys to rebind and no mouse to slow down; a
++    desktop has no thumbs to reposition. Showing both meant every player read
++    past half a screen of settings that could not do anything for them.
++  -->
+   <div id="tab-controls" class="panel hidden">
+-    <div id="bind-list"></div>
+-    <div class="field">
+-      <label for="sensitivity">Mouse sensitivity</label><output id="sensitivity-value"></output>
+-      <input type="range" id="sensitivity" min="4" max="60">
++
++    <div id="controls-pc" class="hidden">
++      <p class="fine" style="text-align:left">
++        Click a key to change it, then press the one you want. Escape cancels,
++        and right or middle click binds that mouse button instead.
++      </p>
++      <div id="bind-list"></div>
++      <div class="field">
++        <label for="sensitivity">Mouse sensitivity</label><output id="sensitivity-value"></output>
++        <input type="range" id="sensitivity" min="4" max="60">
++      </div>
++      <label class="check"><input type="checkbox" id="invert-y">Invert vertical look</label>
++      <label class="check"><input type="checkbox" id="crouch-toggle">Crouch toggles instead of being held</label>
++      <button class="btn quiet" id="reset-binds">Reset keys to defaults</button>
+     </div>
+-    <div class="field" id="touch-sensitivity-row">
+-      <label for="touch-sensitivity">Look sensitivity (touch)</label><output id="touch-sensitivity-value"></output>
+-      <input type="range" id="touch-sensitivity" min="10" max="160">
+-    </div>
+-    <label class="check"><input type="checkbox" id="invert-y">Invert vertical look</label>
+-    <label class="check"><input type="checkbox" id="crouch-toggle">Crouch toggles instead of being held</label>
+-    <button class="btn quiet hidden" id="open-touch-edit">Move the on-screen controls</button>
+-    <button class="btn quiet" id="reset-binds">Reset keys to defaults</button>
++
++    <div id="controls-touch" class="hidden">
++      <p class="fine" style="text-align:left">
++        The stick walks you, the right of the screen turns you. Everything else
++        is a button, and every button goes wherever your thumb wants it.
++      </p>
++      <button class="btn primary wide" id="open-touch-edit">Move and resize the buttons</button>
++      <div class="field">
++        <label for="touch-sensitivity">How far a swipe turns you</label><output id="touch-sensitivity-value"></output>
++        <input type="range" id="touch-sensitivity" min="10" max="160">
++      </div>
++      <label class="check"><input type="checkbox" id="invert-y-touch">Swipe up to look down</label>
++      <label class="check"><input type="checkbox" id="crouch-toggle-touch">Crouch stays down until you tap it again</label>
++      <button class="btn quiet" id="reset-touch">Put the buttons back where they started</button>
++    </div>
++
+   </div>
+ 
+   <div id="tab-graphics" class="panel hidden">

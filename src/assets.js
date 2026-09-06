@@ -101,3 +101,18 @@ export const MODEL_ASSETS = {
 
 /** Set false to ignore assets/models entirely and use primitives. */
 export const USE_ASSET_MODELS = true;
+
+/**
+ * Objects to throw away as soon as a .glb is parsed.
+ *
+ * Placeholder models very often ship with a label attached — Blender's text
+ * object is called "Text" and reads "Text", and it exports along with the
+ * mesh. It floats in the room, and worse, it counts towards the model's
+ * bounding box, so the fit that scales the model to its slot height is
+ * measuring the label as well and everything comes out smaller than asked.
+ *
+ * Matched against the object's name, case-insensitively, whole name only, so
+ * "Text" and "Text.001" go and a crate called "TextureTest" stays. Set to null
+ * to keep everything.
+ */
+export const STRIP_MODEL_OBJECTS = /^(text|label|placeholder)(\.\d+)?$/i;

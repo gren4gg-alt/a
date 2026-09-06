@@ -72,6 +72,7 @@ const el = {
   vote: $('vote'), voteList: $('vote-list'), voteTimer: $('vote-timer'),
   giveUp: $('give-up'),
   touchEdit: $('touch-edit'), teWhich: $('te-which'), rotate: $('rotate'),
+  touchFirst: $('touch-first'), teDone: $('te-done'),
   voteWatch: $('vote-watch'), voteQuit: $('vote-quit'),
   carrying: $('carrying'), carryingName: $('carrying-name'),
   downed: $('downed'), downedTimer: $('downed-timer'), downedNote: $('downed-note'),
@@ -341,6 +342,9 @@ let rafId = 0;
 
 function disposeRun() {
   if (!run) return;
+  // Leaving mid-edit — from the menu button, a disconnect, a crash — would
+  // otherwise strand the editor panel on top of the main menu.
+  if (!el.touchEdit.classList.contains('hidden')) closeTouchEditor();
   touchControls?.detach();
   if (TOUCH) { unlockOrientation(); el.rotate.classList.add('hidden'); }
   closeBoard();
@@ -502,6 +506,25 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     roomMeshes.set(roomId, group);
   }
 
+  // Match every prop's footprint to the model that will actually stand there.
+  //
+  // THIS HAS TO HAPPEN FIRST. It used to run after the loop below, which read
+  // p.fitScale to size the mesh — and p.fitScale did not exist yet. Every
+  // model was therefore drawn at its default height from MODEL_ASSETS while
+  // the collider was rebuilt from the fitted size, so nothing agreed with its
+  // own hitbox: crates in a stack intersected each other, and a chair the
+  // generator had reserved a wide footprint for was drawn small inside it.
+  //
+  // Supplied models come at all sorts of proportions, so the fit is per axis
+  // (see fitInfo) and the collider below is rebuilt from what it returns. The
+  // box you walk into is the box you can see.
+  for (const pr of level.props) {
+    if (!hasModel(pr.kind)) continue;
+    const f = fitInfo(pr.kind, pr.w, pr.h, pr.d);
+    if (!f) continue;
+    pr.w = f.w; pr.h = f.h; pr.d = f.d; pr.fitScale = f.scale;
+  }
+
   // Everything imported gets relit. A GLB brings a MeshStandardMaterial with
   // it, and there is not one light in this scene — the house is lit by a baked
   // vertex attribute and a shader torch — so an untouched import renders as a
@@ -513,23 +536,14 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     if (!hasModel(p.kind)) continue;
     const obj = modelInstance(p.kind);
     if (!obj) continue;
-    if (p.fitScale) obj.scale.setScalar(p.fitScale);
+    if (p.fitScale) obj.scale.set(p.fitScale.x, p.fitScale.y, p.fitScale.z);
+    // p.y is the BASE of the prop, and fit() already sat the model's feet on
+    // its own origin, so these two agree without an offset.
     obj.position.set(p.x, p.y ?? 0, p.z);
     obj.rotation.y = p.facing;
     propMats.apply(obj);
     roomMeshes.get(p.room)?.add(obj);
     modelled++;
-  }
-
-  // Match every prop's footprint to the model that will actually stand there,
-  // BEFORE the colliders are built from it. Supplied models come at all sorts
-  // of proportions; scaling only by height leaves a wide chair sticking out of
-  // its collider and a squat crate with a metre of solid air on top.
-  for (const pr of level.props) {
-    if (!hasModel(pr.kind)) continue;
-    const f = fitInfo(pr.kind, pr.w, pr.h, pr.d);
-    if (!f) continue;
-    pr.w = f.w; pr.h = f.h; pr.d = f.d; pr.fitScale = f.k;
   }
 
   const interact = new Interactables(scene, level);
@@ -710,6 +724,8 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     show(null);
     lastFrame = performance.now();
     rafId = requestAnimationFrame(frame);
+    // After show(null), so the touch buttons are already on screen to drag.
+    maybeFirstRunLayout();
   }, isNet() ? 200 : 450);
 }
 
@@ -2479,6 +2495,9 @@ const settingsUI = buildSettingsUI({
   isTouch: TOUCH,
   onChange: () => { applyGraphics(); applyAudio(); if (run) el.promptKeys.innerHTML = promptText(); },
   onTest: (key) => { audio.resume(); if (key === 'sfx' || key === 'master') audio.pickup(60); },
+  // The store has already been reset by the time this fires; the live buttons
+  // have not, and they are sitting behind the settings screen waiting.
+  onTouchReset: () => touchControls?.applyLayout(),
 });
 
 $('go-solo').addEventListener('click', () => {
@@ -2683,8 +2702,13 @@ if (TOUCH) {
 // Moving the on-screen controls
 // ---------------------------------------------------------------------------
 
-function openTouchEditor() {
+// True while the editor is standing in for a screen rather than sitting on top
+// of one, i.e. the walkthrough the first house on a phone opens with.
+let touchFirstRun = false;
+
+function openTouchEditor({ firstRun = false } = {}) {
   if (!TOUCH) return;
+  touchFirstRun = firstRun;
   touchControls = touchControls ?? new TouchControls($('touch'));
   touchControls.applyLayout();
   touchControls.setEditMode(true);
@@ -2695,15 +2719,64 @@ function openTouchEditor() {
   };
   $('touch').classList.remove('hidden');
   el.touchEdit.classList.remove('hidden');
-  el.teWhich.textContent = 'Nothing selected';
-  syncTouchSliders();
+  el.touchEdit.classList.toggle('first-run', firstRun);
+  el.touchFirst.classList.toggle('hidden', !firstRun);
+  el.teDone.textContent = firstRun ? 'Save and play' : 'Done';
+  el.teWhich.textContent = firstRun ? 'Drag a button to move it' : 'Nothing selected';
+  // These live at z-index 32, under a #touch-first that passes taps straight
+  // through on purpose. Leaving them there means a thumb reaching for a
+  // control it is about to move opens fullscreen instead.
+  el.ingameMenu.classList.add('hidden');
+  $('fullscreen').classList.add('hidden');
+
+  // Nothing should be hunting them while they arrange their thumbs. Solo can
+  // simply stop; multiplayer cannot, because a pause nobody else shares is
+  // just a way to get killed reading a slider, so there the house keeps going
+  // and the walkthrough is something they can dismiss in two taps.
+  if (firstRun && run && !run.over && !isNet()) {
+    run.frozenForLayout = true;
+    run.begun = false;
+  }
 }
 
 function closeTouchEditor() {
   touchControls?.setEditMode(false);
   el.touchEdit.classList.add('hidden');
+  el.touchEdit.classList.remove('first-run');
+  el.touchFirst.classList.add('hidden');
+  el.teDone.textContent = 'Done';
   $('touch').classList.toggle('hidden', !(TOUCH && currentScreen === null));
+  const playing = currentScreen === null && run && !run.over;
+  el.ingameMenu.classList.toggle('hidden', !playing);
+  $('fullscreen').classList.toggle('hidden', !playing);
+
+  if (touchFirstRun) {
+    // Asked once, whether or not they moved anything. Somebody happy with the
+    // defaults has still made a choice.
+    settings.data.touch.layoutChosen = true;
+    touchFirstRun = false;
+  }
+  if (run && run.frozenForLayout) {
+    run.frozenForLayout = false;
+    run.begun = true;
+    // The clock has been stopped for however long they spent in here. Without
+    // this the next frame integrates the whole of it in one step.
+    lastFrame = performance.now();
+  }
   settings.save();
+}
+
+/**
+ * The first house on a phone opens with the buttons in your hands.
+ *
+ * Every mobile game does this and for the same reason: a layout that suits one
+ * pair of thumbs suits nobody else's, and the only moment a player can judge
+ * it is with the real buttons over the real room. Asked once, then never
+ * again — the flag lives in settings, so it survives a reload.
+ */
+function maybeFirstRunLayout() {
+  if (!TOUCH || settings.data.touch.layoutChosen) return;
+  openTouchEditor({ firstRun: true });
 }
 
 function syncTouchSliders() {

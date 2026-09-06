@@ -483,6 +483,20 @@
   #te-which { color: var(--exit); font-size: 0.8rem; min-height: 1.1em; }
   #te-buttons { display: flex; gap: 0.5rem; }
 
+  /* ---- first run on a phone ---- */
+  #touch-first { position: fixed; inset: 0; z-index: 33; pointer-events: none;
+                 display: grid; align-content: start; justify-items: center;
+                 padding: 1.1rem 1rem 0;
+                 background: linear-gradient(to bottom, rgba(2,4,7,0.86) 0%,
+                             rgba(2,4,7,0.55) 34%, rgba(2,4,7,0) 62%); }
+  #tf-card { max-width: min(30rem, 92vw); text-align: center; display: grid; gap: 0.4rem; }
+  #tf-card h2 { font-size: 1rem; letter-spacing: 0.1em; color: var(--ember); }
+  #tf-card p { line-height: 1.5; }
+  /* The editor panel is a corner tool normally. On the first run it is the
+     screen, so it goes to the bottom where a thumb can already reach. */
+  #touch-edit.first-run { top: auto; bottom: 1rem; left: 50%; transform: translateX(-50%);
+                          width: min(24rem, 92vw); }
+
   /* ---- turn the phone ---- */
   #rotate { position: fixed; inset: 0; z-index: 45; background: var(--void);
             display: grid; place-content: center; justify-items: center; gap: 1rem;
@@ -591,6 +605,21 @@
   </div>
 </div>
 <div id="touch" class="hidden"></div>
+
+<!--
+  Shown once, the first time somebody plays on a phone, over the real buttons
+  in the real room. Pointer-events off throughout: every tap and drag has to
+  reach the buttons underneath, which is the entire point of the screen.
+-->
+<div id="touch-first" class="hidden">
+  <div id="tf-card">
+    <h2>Put the controls where your thumbs are</h2>
+    <p class="fine">
+      Drag any button to move it. Tap one to pick it, then use the sliders to
+      resize it. Nothing is chasing you yet.
+    </p>
+  </div>
+</div>
 
 <div id="touch-edit" class="hidden">
   <h2>Move the controls</h2>
@@ -819,7 +848,7 @@
   <h1>Settings</h1>
   <div id="settings-tabs">
     <button data-tab="audio" class="active">Audio</button>
-    <button data-tab="controls">Controls</button>
+    <button data-tab="controls" id="tab-controls-btn">Controls</button>
     <button data-tab="graphics">Graphics</button>
   </div>
 
@@ -851,20 +880,44 @@
     </p>
   </div>
 
+  <!--
+    Two control panels, one per input device, and you only ever see the one you
+    are playing on. A phone has no keys to rebind and no mouse to slow down; a
+    desktop has no thumbs to reposition. Showing both meant every player read
+    past half a screen of settings that could not do anything for them.
+  -->
   <div id="tab-controls" class="panel hidden">
-    <div id="bind-list"></div>
-    <div class="field">
-      <label for="sensitivity">Mouse sensitivity</label><output id="sensitivity-value"></output>
-      <input type="range" id="sensitivity" min="4" max="60">
+
+    <div id="controls-pc" class="hidden">
+      <p class="fine" style="text-align:left">
+        Click a key to change it, then press the one you want. Escape cancels,
+        and right or middle click binds that mouse button instead.
+      </p>
+      <div id="bind-list"></div>
+      <div class="field">
+        <label for="sensitivity">Mouse sensitivity</label><output id="sensitivity-value"></output>
+        <input type="range" id="sensitivity" min="4" max="60">
+      </div>
+      <label class="check"><input type="checkbox" id="invert-y">Invert vertical look</label>
+      <label class="check"><input type="checkbox" id="crouch-toggle">Crouch toggles instead of being held</label>
+      <button class="btn quiet" id="reset-binds">Reset keys to defaults</button>
     </div>
-    <div class="field" id="touch-sensitivity-row">
-      <label for="touch-sensitivity">Look sensitivity (touch)</label><output id="touch-sensitivity-value"></output>
-      <input type="range" id="touch-sensitivity" min="10" max="160">
+
+    <div id="controls-touch" class="hidden">
+      <p class="fine" style="text-align:left">
+        The stick walks you, the right of the screen turns you. Everything else
+        is a button, and every button goes wherever your thumb wants it.
+      </p>
+      <button class="btn primary wide" id="open-touch-edit">Move and resize the buttons</button>
+      <div class="field">
+        <label for="touch-sensitivity">How far a swipe turns you</label><output id="touch-sensitivity-value"></output>
+        <input type="range" id="touch-sensitivity" min="10" max="160">
+      </div>
+      <label class="check"><input type="checkbox" id="invert-y-touch">Swipe up to look down</label>
+      <label class="check"><input type="checkbox" id="crouch-toggle-touch">Crouch stays down until you tap it again</label>
+      <button class="btn quiet" id="reset-touch">Put the buttons back where they started</button>
     </div>
-    <label class="check"><input type="checkbox" id="invert-y">Invert vertical look</label>
-    <label class="check"><input type="checkbox" id="crouch-toggle">Crouch toggles instead of being held</label>
-    <button class="btn quiet hidden" id="open-touch-edit">Move the on-screen controls</button>
-    <button class="btn quiet" id="reset-binds">Reset keys to defaults</button>
+
   </div>
 
   <div id="tab-graphics" class="panel hidden">

@@ -111,6 +111,10 @@ const DEFAULTS = () => ({
     // 1, not TOUCH_LAYOUT_VERSION: a save from before this key existed leaves
     // the default in place, and the mismatch is exactly the signal we want.
     layoutVersion: 1,
+    // Whether they have ever been shown the arrange-your-buttons screen. Not
+    // "have they moved anything" — someone who is happy with the defaults
+    // should still only be asked once.
+    layoutChosen: false,
     scale: 1.0,
     opacity: 0.45,
     stickSize: 132,
@@ -166,6 +170,9 @@ class SettingsStore {
   resetTouchLayout() {
     this.data.touch.layout = JSON.parse(JSON.stringify(TOUCH_DEFAULTS));
     this.data.touch.layoutVersion = TOUCH_LAYOUT_VERSION;
+    // Deliberately NOT clearing layoutChosen. Somebody who reset from the
+    // settings screen is already in the editor's world and does not need the
+    // first-run walkthrough thrown at them next time they load a house.
     this.data.touch.scale = 1.0;
     this.data.touch.opacity = 0.45;
     this.data.touch.stickSize = 132;

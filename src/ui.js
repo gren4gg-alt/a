@@ -10,11 +10,18 @@ import { settings, QUALITY, BINDABLE, keyLabel } from './settings.js';
 
 const $ = (id) => document.getElementById(id);
 
-export function buildSettingsUI({ onChange, onTest, isTouch = false }) {
+export function buildSettingsUI({ onChange, onTest, onTouchReset, isTouch = false }) {
   const tabs = [...document.querySelectorAll('#settings-tabs [data-tab]')];
   const panels = {
     audio: $('tab-audio'), controls: $('tab-controls'), graphics: $('tab-graphics'),
   };
+
+  // Only ever one of these on screen. A phone has no keys to rebind and no
+  // mouse to slow down; a desktop has no thumbs to reposition. Decided once,
+  // here, from the same isTouch the rest of the game uses.
+  $('controls-pc').classList.toggle('hidden', isTouch);
+  $('controls-touch').classList.toggle('hidden', !isTouch);
+  $('tab-controls-btn').textContent = isTouch ? 'Controls' : 'Keys & mouse';
 
   function openTab(name) {
     for (const t of tabs) t.classList.toggle('active', t.dataset.tab === name);
@@ -129,8 +136,6 @@ export function buildSettingsUI({ onChange, onTest, isTouch = false }) {
 
   const touchSens = $('touch-sensitivity');
   const touchSensOut = $('touch-sensitivity-value');
-  const touchRow = $('touch-sensitivity-row');
-  touchRow.classList.toggle('hidden', !isTouch);
   touchSens.value = String(Math.round((settings.data.input.touchSensitivity ?? 5) * 10));
   touchSensOut.textContent = (Number(touchSens.value) / 10).toFixed(1);
   touchSens.addEventListener('input', () => {
@@ -139,25 +144,43 @@ export function buildSettingsUI({ onChange, onTest, isTouch = false }) {
     settings.save();
   });
 
-  const invert = $('invert-y');
-  invert.checked = settings.data.input.invertY;
-  invert.addEventListener('change', () => {
-    settings.data.input.invertY = invert.checked;
-    settings.save();
-  });
+  // Invert-look and crouch-toggle are the same two settings on both devices,
+  // but they are worded for the device you are holding — "invert vertical
+  // look" means nothing to somebody dragging a thumb. One checkbox each per
+  // panel, both writing the same value, and both kept in step so switching
+  // device on the same profile never shows a stale tick.
+  const inverts = [$('invert-y'), $('invert-y-touch')];
+  for (const box of inverts) {
+    box.addEventListener('change', () => {
+      settings.data.input.invertY = box.checked;
+      for (const other of inverts) other.checked = box.checked;
+      settings.save();
+    });
+  }
 
-  const crouchToggle = $('crouch-toggle');
-  crouchToggle.checked = settings.data.input.crouchToggle;
-  crouchToggle.addEventListener('change', () => {
-    settings.data.input.crouchToggle = crouchToggle.checked;
-    settings.save();
-    onChange?.();
-  });
+  const crouchToggles = [$('crouch-toggle'), $('crouch-toggle-touch')];
+  for (const box of crouchToggles) {
+    box.addEventListener('change', () => {
+      settings.data.input.crouchToggle = box.checked;
+      for (const other of crouchToggles) other.checked = box.checked;
+      settings.save();
+      onChange?.();
+    });
+  }
 
   $('reset-binds').addEventListener('click', () => {
     for (const b of BINDABLE) settings.data.binds[b.id] = b.def;
     settings.save();
     renderBinds();
+    onChange?.();
+  });
+
+  // The touch equivalent. Deliberately not the same button: on a phone
+  // "reset keys to defaults" is offering to fix something you cannot see.
+  $('reset-touch').addEventListener('click', () => {
+    settings.resetTouchLayout();
+    onTouchReset?.();
+    refresh();
     onChange?.();
   });
 
@@ -213,8 +236,8 @@ export function buildSettingsUI({ onChange, onTest, isTouch = false }) {
     touchSensOut.textContent = (Number(touchSens.value) / 10).toFixed(1);
     sens.value = String(Math.round(settings.data.input.sensitivity * 10));
     sensOut.textContent = settings.data.input.sensitivity.toFixed(1);
-    invert.checked = settings.data.input.invertY;
-    crouchToggle.checked = settings.data.input.crouchToggle;
+    for (const box of inverts) box.checked = settings.data.input.invertY;
+    for (const box of crouchToggles) box.checked = settings.data.input.crouchToggle;
     fov.value = String(settings.data.graphics.fov);
     fovOut.textContent = `${fov.value}°`;
     renderBinds();
