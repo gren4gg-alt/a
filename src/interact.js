@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { createGlowMaterial } from './material.js';
 import { instance as modelInstance, has as hasModel } from './models.js';
 import { CONFIG } from './level.js';
-import { createBoard, applyStroke, createNoticeTexture } from './boards.js';
+import { createBoard, applyStroke, createNoticeTexture, noticeLines } from './boards.js';
 
 // ---------------------------------------------------------------------------
 // Things you can walk up to and use.
@@ -17,9 +17,12 @@ import { createBoard, applyStroke, createNoticeTexture } from './boards.js';
 export const USE_RANGE = 1.9;
 
 export class Interactables {
-  constructor(scene, level) {
+  constructor(scene, level, difficulty = null) {
     this.scene = scene;
     this.level = level;
+    // Only the notice uses it, and only to leave out warnings that are not
+    // true of this house.
+    this.difficulty = difficulty;
     this.closets = [];
     this.terminals = [];
     this.holders = [];
@@ -72,20 +75,47 @@ export class Interactables {
     const n = this.level.notice;
     if (!n) return;
     const group = new THREE.Group();
+    // Hung so the top edge stays at a constant height whatever the board
+    // grows to; a notice that got taller downwards would end up in the
+    // skirting board. Set after the size is known, further down.
     group.position.set(n.x, 1.6, n.z);
     group.rotation.y = n.facing + Math.PI;   // same half-turn as the boards
-    const geo = new THREE.PlaneGeometry(1.5, 1.07);
-    const mat = new THREE.MeshBasicMaterial({ map: createNoticeTexture() });
+    // Cut the paper to the words rather than the words to the paper. The
+    // notice sizes its own canvas, hands back the aspect, and the plane is
+    // built from that — so a new rule, or one dropped because this house has
+    // no traps, changes the shape of the thing on the wall and nothing else.
+    const notice = createNoticeTexture(noticeLines(this.difficulty, this.level));
+
+    // A fixed number of canvas pixels per metre, NOT a fixed plane size.
+    //
+    // Pinning the height and deriving the width from the aspect would keep the
+    // board the same size and shrink the type every time a rule was added,
+    // which is the failure this was supposed to end. At a constant scale the
+    // lettering is always the same height on the wall and the paper grows to
+    // hold it. Capped so a long notice cannot reach the ceiling; past the cap
+    // it does start shrinking, because a board through the floor is worse.
+    const PX_PER_METRE = 700;
+    let W = notice.width / PX_PER_METRE;
+    let H = notice.height / PX_PER_METRE;
+    const MAX_H = 2.0, MAX_W = 2.6;
+    const squeeze = Math.min(1, MAX_H / H, MAX_W / W);
+    W *= squeeze; H *= squeeze;
+    const geo = new THREE.PlaneGeometry(W, H);
+    const mat = new THREE.MeshBasicMaterial({ map: notice.texture });
     const face = new THREE.Mesh(geo, mat);
     face.position.z = 0.02;
     group.add(face);
 
     // A thin board behind it, so it reads as pinned up rather than floating.
     const backing = new THREE.Mesh(
-      new THREE.BoxGeometry(1.62, 1.19, 0.05),
+      new THREE.BoxGeometry(W + 0.12, H + 0.12, 0.05),
       createGlowMaterial(0x2a2018, { additive: false, depthWrite: true, gain: 0.5 }),
     );
     group.add(backing);
+    // Centre it on the height a person reads at, but never let the bottom
+    // edge dip below the skirting.
+    group.position.y = Math.max(1.5, 0.55 + H / 2);
+
     this.scene.add(group);
     this.notice = group;
   }

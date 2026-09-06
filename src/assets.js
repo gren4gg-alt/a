@@ -102,6 +102,63 @@ export const MODEL_ASSETS = {
 /** Set false to ignore assets/models entirely and use primitives. */
 export const USE_ASSET_MODELS = true;
 
+// ---------------------------------------------------------------------------
+// THE SIZE DIALS. Start here when something looks too small or too big.
+//
+// Three of them, in the order you should reach for them:
+//
+//   1. PROP_SIZE, just below. A plain multiplier per slot, applied on top of
+//      the automatic fit. 1.0 leaves it alone, 1.3 makes that one thing 30%
+//      bigger, 0.8 shrinks it. The collider is rebuilt from the result, so you
+//      cannot knock the hitbox out of alignment by turning these — change it,
+//      reload, look, change it again. This is the one to tinker with.
+//
+//   2. `height` in MODEL_ASSETS above. Only matters for slots the generator
+//      does NOT give a footprint to — the ghost, the door, the closet, the
+//      terminal, the knife, the relic, and the player bodies. For furniture it
+//      is only a starting measurement; the generator overrides it per piece.
+//
+//   3. MAX_STRETCH in models.js. How far one axis may deform away from the
+//      others to fill the footprint the generator reserved. 1.0 is strictly
+//      uniform. Raise it and boxy placeholders fill their space better; real
+//      furniture starts looking squashed.
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-slot size multiplier. Anything not listed is 1.0.
+ *
+ * These are yours to play with. Nothing else in the game reads them, and
+ * getting one wrong makes that model the wrong size and nothing more.
+ */
+export const PROP_SIZE = {
+  chair:     1.0,
+  table:     1.0,
+  bed:       1.0,
+  shelf:     1.0,
+  cabinet:   1.0,
+  crate:     1.0,
+  lamp:      1.0,
+  rug:       1.0,
+  painting:  1.0,
+};
+
+/**
+ * Per-slot tint, as a hex colour. null leaves the model's own colour alone.
+ *
+ * This exists for models that come out white. glTF only carries a base colour
+ * and image textures — a material built out of procedural nodes has nothing to
+ * export, so the exporter writes a plain white base colour and the shading you
+ * set up in Blender is simply not in the file. The real fix is to bake those
+ * nodes down to an image texture and re-export. This is the stopgap: it will
+ * not give you wood grain, but it will stop a crate being the brightest thing
+ * in a dark house.
+ */
+export const MODEL_TINT = {
+  // crate:  0x8a6a44,
+  // table:  0x6f5334,
+  // shelf:  0x5f462c,
+};
+
 /**
  * Objects to throw away as soon as a .glb is parsed.
  *

@@ -22,7 +22,12 @@
 // A fixed count barely registered once houses got large: you could walk for
 // minutes without meeting anything.
 //
-// closetShare and boardShare are fractions of the room count. Closets scale
+// closetShare and boardShare are fractions of the room count. boardShare went
+// up by about a third across every house: a chalkboard is the only way to
+// leave anything for someone you are separated from, and at the old rate you
+// could cross half a house without passing one.
+//
+// Closets scale
 // hard with difficulty: at one ghost per seven rooms there has to be somewhere
 // to get off the floor, and the harder houses are where you need it.
 //
@@ -34,7 +39,7 @@ export const DIFFICULTIES = [
   {
     id: 'quiet',
     closetShare: 0.1,
-    boardShare: 0.12,
+    boardShare: 0.16,
     ghostShare: 0.15,
     hearsVoice: false,
     label: 'Quiet',
@@ -54,7 +59,7 @@ export const DIFFICULTIES = [
   {
     id: 'restless',
     closetShare: 0.15,
-    boardShare: 0.15,
+    boardShare: 0.20,
     ghostShare: 0.15,
     hearsVoice: false,
     label: 'Restless',
@@ -74,7 +79,7 @@ export const DIFFICULTIES = [
   {
     id: 'hunted',
     closetShare: 0.25,
-    boardShare: 0.18,
+    boardShare: 0.24,
     ghostShare: 0.15,
     hearsVoice: true,
     label: 'Hunted',
@@ -94,7 +99,7 @@ export const DIFFICULTIES = [
   {
     id: 'starving',
     closetShare: 0.3,
-    boardShare: 0.22,
+    boardShare: 0.30,
     ghostShare: 0.15,
     hearsVoice: true,
     label: 'Starving',

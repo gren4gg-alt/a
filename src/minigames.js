@@ -49,7 +49,14 @@ export function startMinigame(type, host, opts) {
     done = true;
     status.textContent = 'Done.';
     frame.classList.add('mg-won');
-    setTimeout(() => opts.onWin(), 550);
+    // Called straight away, NOT after a flourish on a timer.
+    //
+    // Closing the terminal has to recapture the mouse, and a browser will only
+    // hand the pointer lock back inside the gesture that asked for it. Half a
+    // second later that gesture has expired, the lock is refused, and the
+    // player is dumped back into the room looking at the click-to-look screen
+    // as if they had paused. The win animation is not worth that.
+    opts.onWin();
   };
 
   const builders = { tiles: buildTiles, sums: buildSums, blocks: buildBlocks };
@@ -199,14 +206,21 @@ function buildSums(body, status, win) {
 // ---------------------------------------------------------------------------
 // 3. Match the plate — swap blocks until the row matches the picture above it.
 //
-// Two clicks to swap. Six blocks is enough to need thought and few enough to
-// take in at a glance when you are already panicking.
+// Two clicks to swap. Nine blocks: long enough that you cannot solve it by
+// accident, short enough to take in at a glance when you are already
+// panicking. The row wraps on a narrow screen rather than shrinking the
+// blocks below what a thumb can hit.
 // ---------------------------------------------------------------------------
 
-const BLOCK_COLOURS = ['#c2704a', '#4a7fc2', '#c2b04a', '#6ac28a', '#a06ac2', '#c24a6a'];
+const BLOCK_COLOURS = [
+  '#c2704a', '#4a7fc2', '#c2b04a', '#6ac28a', '#a06ac2',
+  '#c24a6a', '#4ac2b4', '#c2884a', '#8ac24a',
+];
 
 function buildBlocks(body, status, win) {
-  const N = 5;
+  // Nine columns. BLOCK_COLOURS must have at least this many entries — every
+  // block is a different colour, so the two rows can be compared at a glance.
+  const N = 9;
   const target = [...Array(N).keys()];
   let current = shuffled(target);
   while (current.every((v, i) => v === target[i])) current = shuffled(target);

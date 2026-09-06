@@ -23,7 +23,7 @@ import { settings } from './settings.js';
 const DEAD_ZONE = 0.14;
 
 /** action, label, and whether holding it means anything. */
-const BUTTONS = [
+export const BUTTONS = [
   { id: 'interact',   label: 'USE',     cls: 'primary' },
   { id: 'power',      label: 'ABILITY' },
   { id: 'crouch',     label: 'CROUCH',  hold: true },
@@ -31,6 +31,16 @@ const BUTTONS = [
   { id: 'flashlight', label: 'TORCH' },
   { id: 'talk',       label: 'TALK',    hold: true },
 ];
+
+/**
+ * What each action is CALLED on a phone.
+ *
+ * The HUD used to write out the keyboard bind for everything — "E to pick
+ * someone up", "Flare · Q" — on a device with no E and no Q. The on-screen
+ * button already has a caption; this is that caption, so what the world tells
+ * you to press matches what is under your thumb.
+ */
+export const TOUCH_LABELS = Object.fromEntries(BUTTONS.map((b) => [b.id, b.label]));
 
 // ---------------------------------------------------------------------------
 // Orientation.

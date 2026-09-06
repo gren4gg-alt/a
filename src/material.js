@@ -421,29 +421,41 @@ export class PropMaterials {
     this.cache = new Map();
   }
 
-  /** Swap every material in a subtree. Returns the object, for chaining. */
-  apply(root) {
+  /**
+   * Swap every material in a subtree. Returns the object, for chaining.
+   *
+   * `tint` multiplies the model's own base colour. It exists for the models
+   * that arrive white: glTF carries a base colour and image textures, and
+   * nothing else, so a material built out of procedural nodes exports as plain
+   * white and the shading never leaves the modelling package. Baking those
+   * nodes to an image is the real answer; this stops a crate being the
+   * brightest object in the house in the meantime. See MODEL_TINT in
+   * assets.js.
+   */
+  apply(root, { tint = null } = {}) {
     if (!root) return root;
     root.traverse((o) => {
       if (!o.isMesh && !o.isSkinnedMesh && !o.isPoints && !o.isLine) return;
       o.material = Array.isArray(o.material)
-        ? o.material.map((m) => this._for(m))
-        : this._for(o.material);
+        ? o.material.map((m) => this._for(m, tint))
+        : this._for(o.material, tint);
     });
     return root;
   }
 
-  _for(source) {
+  _for(source, tint) {
     if (!source || source.isShaderMaterial) return source;
-    const key = `${source.uuid}`;
+    // Two props sharing a source material but tinted differently are two
+    // materials, so the tint has to be part of the key.
+    const key = `${source.uuid}|${tint ?? 'none'}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
-    const made = this._build(source);
+    const made = this._build(source, tint);
     this.cache.set(key, made);
     return made;
   }
 
-  _build(source) {
+  _build(source, tint) {
     const m = new THREE.MeshBasicMaterial({
       map: source.map ?? null,
       color: source.color ? source.color.clone() : new THREE.Color(0xffffff),
@@ -459,6 +471,9 @@ export class PropMaterials {
       // be a second one on top of it.
       fog: false,
     });
+    if (tint !== null && tint !== undefined) {
+      m.color.multiply(new THREE.Color().setHex(tint, THREE.SRGBColorSpace));
+    }
     m.name = `prop:${source.name || 'unnamed'}`;
 
     const u = this.house.uniforms;

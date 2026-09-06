@@ -229,78 +229,149 @@ export class BoardEditor {
 // wants from them.
 // ---------------------------------------------------------------------------
 
-const NOTICE = [
-  ['title', 'IF YOU ARE READING THIS'],
-  ['rule', 'The door out wants four things. Find them.'],
-  ['rule', 'Each one sits by a screen. Beat the screen, take the object,'],
-  ['rule', 'carry it back and set it in one of the four holders.'],
-  ['gap', ''],
-  ['warn', 'THE SCREENS ARE LOUD. Everything in here hears them.'],
-  ['rule', 'Walk away from one at any time. Esc, or click off it.'],
-  ['gap', ''],
-  ['warn', 'THIS ROOM IS THE ONE PLACE THEY WILL NOT COME.'],
-  ['rule', 'Stand in here and nothing out there knows you exist.'],
-  ['gap', ''],
-  ['rule', 'It cannot see through walls. It cannot hear you standing still.'],
-  ['rule', 'Running is loud. On a bad night, so is talking.'],
-  ['gap', ''],
-  ['rule', 'Closets hide one person. A lit peephole means taken.'],
-  ['rule', 'Crawl holes are too low for it to follow. Crouch.'],
-  ['gap', ''],
-  ['rule', 'If it puts you down, someone has to come and lift you up.'],
-  ['warn', 'NOBODY LEAVES UNTIL EVERYONE IS AT THE DOOR.'],
-];
+/**
+ * The notice by the front door, as a list of lines.
+ *
+ * Built per house rather than sat in a constant, because half of what it says
+ * is only true on some of them: a Quiet house has no traps to warn about and
+ * cannot hear you talking, and telling a first-timer otherwise is worse than
+ * saying nothing. The board sizes itself to whatever comes back, so adding a
+ * line here is the whole job — no measuring, no re-cutting the plane.
+ *
+ * @param difficulty an entry from DIFFICULTIES, or nothing for the common set
+ * @param level      the generated level, for the counts it can quote exactly
+ */
+export function noticeLines(difficulty = null, level = null) {
+  const relics = level?.holders?.length ?? 4;
+  const ghosts = level?.ghostCount ?? 0;
+  const out = [
+    ['title', 'IF YOU ARE READING THIS'],
+    ['rule', `The door out wants ${relics === 4 ? 'four' : relics} things. Find them.`],
+    ['rule', 'Each one sits by a screen. Beat the screen, take the object,'],
+    ['rule', 'carry it back and set it in one of the holders.'],
+    ['gap', ''],
+    ['warn', 'THE SCREENS ARE LOUD. Everything in here hears them.'],
+    ['rule', 'Walk away from one at any time \u2014 you lose only your progress.'],
+    ['gap', ''],
+    ['warn', 'THIS ROOM IS THE ONE PLACE THEY WILL NOT COME.'],
+    ['rule', 'Stand in here and nothing out there knows you exist.'],
+    ['gap', ''],
+    ['rule', 'It cannot see through walls. It cannot hear you standing still.'],
+    ['rule', 'Running is loud.'],
+  ];
 
-export function createNoticeTexture() {
+  // Only true on the houses where it is true.
+  if (difficulty?.hearsVoice) {
+    out.push(['warn', 'IT CAN HEAR YOUR VOICE IN HERE. Talking carries.']);
+  }
+  out.push(['gap', '']);
+  out.push(['rule', 'Closets hide one person. A lit peephole means taken.']);
+  out.push(['rule', 'Crawl holes are too low for it to follow. Crouch.']);
+
+  if (difficulty?.trapInterval) {
+    out.push(['gap', '']);
+    out.push(['warn', 'IT LEAVES THINGS ON THE FLOOR. Watch where you run.']);
+  }
+  if (ghosts > 1) {
+    out.push(['gap', '']);
+    out.push(['rule', `There is more than one of them. We counted ${ghosts}.`]);
+  }
+
+  out.push(['gap', '']);
+  out.push(['rule', 'If it puts you down, someone has to come and lift you up.']);
+  out.push(['warn', 'NOBODY LEAVES UNTIL EVERYONE IS AT THE DOOR.']);
+  return out;
+}
+
+// How each kind of line is drawn, and how much room it needs underneath.
+const NOTICE_STYLE = {
+  title: { font: '700 40px "IBM Plex Sans", system-ui, sans-serif', fill: '#2e2415', after: 50, rule: true },
+  warn:  { font: '600 25px "IBM Plex Sans", system-ui, sans-serif', fill: '#8c2f1c', after: 34 },
+  rule:  { font: '300 25px "IBM Plex Sans", system-ui, sans-serif', fill: '#3a2f1d', after: 32 },
+  gap:   { after: 16 },
+};
+
+const NOTICE_PAD = 52;       // left and right margin inside the border
+const NOTICE_TOP = 92;       // baseline of the first line
+const NOTICE_BOTTOM = 46;    // clear space under the last line
+
+/**
+ * Draw the notice, sized to its own contents.
+ *
+ * The old version painted into a hardcoded 900x640 and was hung on a
+ * hardcoded 1.5 x 1.07 plane, so any edit to the text either overflowed the
+ * canvas or left a slab of blank paper. Now the canvas is measured from the
+ * lines themselves and the caller is handed the aspect ratio to cut the plane
+ * to, which means adding a line is a one-line change and nothing else moves.
+ *
+ * @returns {{texture: THREE.CanvasTexture, width: number, height: number, aspect: number}}
+ */
+export function createNoticeTexture(lines = noticeLines()) {
+  const measure = document.createElement('canvas').getContext('2d');
+
+  // Pass one: how wide does the widest line want to be, and how tall is the
+  // stack? Nothing is drawn yet.
+  let widest = 0;
+  let height = NOTICE_TOP;
+  for (const [kind, text] of lines) {
+    const st = NOTICE_STYLE[kind] ?? NOTICE_STYLE.rule;
+    if (st.font && text) {
+      measure.font = st.font;
+      widest = Math.max(widest, measure.measureText(text).width);
+    }
+    height += st.after;
+    if (st.rule) height += 22;
+  }
+  height += NOTICE_BOTTOM;
+
+  // Round up to keep the texture on friendly numbers, and hold a sane floor so
+  // a very short notice is still a readable object on a wall.
+  const width = Math.max(700, Math.ceil((widest + NOTICE_PAD * 2) / 16) * 16);
+  height = Math.max(360, Math.ceil(height / 16) * 16);
+
   const canvas = document.createElement('canvas');
-  canvas.width = 900;
-  canvas.height = 640;
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext('2d');
 
   ctx.fillStyle = '#cfc3a6';
-  ctx.fillRect(0, 0, 900, 640);
+  ctx.fillRect(0, 0, width, height);
 
-  // Age it, or it reads as a UI panel bolted to a wall.
+  // Age it, or it reads as a UI panel bolted to a wall. Blot count follows the
+  // area so a tall notice is not noticeably cleaner than a short one.
+  const blots = Math.round((width * height) / 4800);
   ctx.globalAlpha = 0.10;
   ctx.fillStyle = '#6a5636';
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < blots; i++) {
     const r = 8 + Math.random() * 46;
     ctx.beginPath();
-    ctx.arc(Math.random() * 900, Math.random() * 640, r, 0, Math.PI * 2);
+    ctx.arc(Math.random() * width, Math.random() * height, r, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.globalAlpha = 1;
 
   ctx.strokeStyle = '#6a5a3e';
   ctx.lineWidth = 5;
-  ctx.strokeRect(18, 18, 864, 604);
+  ctx.strokeRect(18, 18, width - 36, height - 36);
 
-  let y = 92;
-  for (const [kind, text] of NOTICE) {
-    if (kind === 'gap') { y += 16; continue; }
-    if (kind === 'title') {
-      ctx.fillStyle = '#2e2415';
-      ctx.font = '700 40px "IBM Plex Sans", system-ui, sans-serif';
-      ctx.fillText(text, 52, y);
-      y += 50;
+  let y = NOTICE_TOP;
+  for (const [kind, text] of lines) {
+    const st = NOTICE_STYLE[kind] ?? NOTICE_STYLE.rule;
+    if (st.font && text) {
+      ctx.fillStyle = st.fill;
+      ctx.font = st.font;
+      ctx.fillText(text, NOTICE_PAD, y);
+    }
+    y += st.after;
+    if (st.rule) {
       ctx.fillStyle = '#6a5a3e';
-      ctx.fillRect(52, y - 22, 796, 3);
+      ctx.fillRect(NOTICE_PAD, y - 22, width - NOTICE_PAD * 2, 3);
       y += 22;
-    } else if (kind === 'warn') {
-      ctx.fillStyle = '#8c2f1c';
-      ctx.font = '600 25px "IBM Plex Sans", system-ui, sans-serif';
-      ctx.fillText(text, 52, y);
-      y += 34;
-    } else {
-      ctx.fillStyle = '#3a2f1d';
-      ctx.font = '300 25px "IBM Plex Sans", system-ui, sans-serif';
-      ctx.fillText(text, 52, y);
-      y += 32;
     }
   }
 
   const t = new THREE.CanvasTexture(canvas);
   t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = 4;
-  return t;
+  return { texture: t, width, height, aspect: width / height };
 }

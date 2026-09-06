@@ -311,8 +311,12 @@
            border: 1px solid rgba(143,214,255,0.28); padding: 0.4rem 1rem; }
   .mg-go:hover { border-color: #8fd6ff; }
 
-  .mg-blocks { display: flex; gap: 0.35rem; }
-  .mg-block { width: 2.6rem; height: 2.6rem; border: 1px solid rgba(0,0,0,0.4);
+  /* Nine across. A fixed row would run off a phone held sideways, so it wraps
+     and both rows wrap the same way — the two stay readable against each
+     other, which is the whole puzzle. */
+  .mg-blocks { display: flex; flex-wrap: wrap; justify-content: center;
+               gap: 0.3rem; max-width: 26rem; }
+  .mg-block { width: 2.4rem; height: 2.4rem; border: 1px solid rgba(0,0,0,0.4);
               padding: 0; cursor: pointer; }
   .mg-target .mg-block { cursor: default; opacity: 0.85; }
   .mg-block.picked { outline: 2px solid #8fd6ff; outline-offset: 2px; }
@@ -472,16 +476,29 @@
   #touch.editing .tc-look, #touch.editing .tc-stickzone { pointer-events: none; }
 
   /* ---- control customiser ---- */
+  /* ---- control customiser ----
+     Small on purpose. It sits on top of the buttons you are trying to see, so
+     it takes as little of the screen as it can and you can drag it out of the
+     way by its grip when it is still in the wrong place. */
   #touch-edit { position: fixed; left: 1rem; top: 1rem; z-index: 34;
-                width: min(19rem, 46vw); display: grid; gap: 0.6rem;
-                padding: 0.9rem 1rem; background: rgba(5,7,10,0.92);
-                border: 1px solid var(--line); }
-  #touch-edit h2 { font-size: 0.92rem; }
-  #touch-edit p { color: var(--ink-dim); font-size: 0.76rem; line-height: 1.5; }
-  #touch-edit .field { gap: 0.3rem 0.8rem; }
-  #touch-edit .field label { font-size: 0.8rem; }
-  #te-which { color: var(--exit); font-size: 0.8rem; min-height: 1.1em; }
-  #te-buttons { display: flex; gap: 0.5rem; }
+                width: 14.5rem; max-width: 62vw; display: grid; gap: 0.35rem;
+                padding: 0.5rem 0.6rem 0.6rem; background: rgba(5,7,10,0.94);
+                border: 1px solid var(--line); border-radius: 4px;
+                touch-action: none; }
+  #te-grip { display: flex; align-items: center; gap: 0.4rem; cursor: grab;
+             margin: -0.5rem -0.6rem 0.1rem; padding: 0.42rem 0.6rem;
+             font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
+             color: var(--ink-dim); background: rgba(207,196,180,0.06);
+             border-bottom: 1px solid var(--line); user-select: none; }
+  #te-grip.dragging { cursor: grabbing; }
+  #te-grip-dots { letter-spacing: -0.15em; opacity: 0.55; }
+  #touch-edit .field { gap: 0.1rem 0.6rem; }
+  #touch-edit .field label { font-size: 0.72rem; }
+  #touch-edit output { font-size: 0.72rem; }
+  #touch-edit input[type="range"] { height: 1.5rem; }
+  #te-which { color: var(--exit); font-size: 0.72rem; min-height: 1.1em; }
+  #te-buttons { display: flex; gap: 0.4rem; margin-top: 0.15rem; }
+  #te-buttons .btn { flex: 1; padding: 0.42rem 0.5rem; font-size: 0.76rem; }
 
   /* ---- first run on a phone ---- */
   #touch-first { position: fixed; inset: 0; z-index: 33; pointer-events: none;
@@ -494,8 +511,7 @@
   #tf-card p { line-height: 1.5; }
   /* The editor panel is a corner tool normally. On the first run it is the
      screen, so it goes to the bottom where a thumb can already reach. */
-  #touch-edit.first-run { top: auto; bottom: 1rem; left: 50%; transform: translateX(-50%);
-                          width: min(24rem, 92vw); }
+  #touch-edit.first-run { top: auto; bottom: 1rem; left: 50%; transform: translateX(-50%); }
 
   /* ---- turn the phone ---- */
   #rotate { position: fixed; inset: 0; z-index: 45; background: var(--void);
@@ -622,26 +638,21 @@
 </div>
 
 <div id="touch-edit" class="hidden">
-  <h2>Move the controls</h2>
-  <p>Drag any button where you want it. Tap one to resize just that button.</p>
-  <div id="te-which">Nothing selected</div>
+  <!--
+    A drag handle, and then the only two things worth changing with a thumb on
+    a live screen: how big this button is, and how much of the room you can see
+    through it. Everything else moved to Settings, where there is room for it.
+  -->
+  <div id="te-grip"><span id="te-grip-dots">&#8942;&#8942;</span><span>Controls</span></div>
+  <div id="te-which">Tap a button</div>
   <div class="field">
-    <label for="te-size">This button</label><output id="te-size-value"></output>
+    <label for="te-size">Size</label><output id="te-size-value"></output>
     <input type="range" id="te-size" min="40" max="150">
-  </div>
-  <div class="field">
-    <label for="te-scale">Everything</label><output id="te-scale-value"></output>
-    <input type="range" id="te-scale" min="60" max="180">
   </div>
   <div class="field">
     <label for="te-opacity">See-through</label><output id="te-opacity-value"></output>
     <input type="range" id="te-opacity" min="10" max="90">
   </div>
-  <div class="field">
-    <label for="te-stick">Stick size</label><output id="te-stick-value"></output>
-    <input type="range" id="te-stick" min="90" max="200">
-  </div>
-  <label class="check"><input type="checkbox" id="te-landscape">Force landscape in game</label>
   <div id="te-buttons">
     <button class="btn primary" id="te-done">Done</button>
     <button class="btn quiet" id="te-reset">Reset</button>
@@ -688,7 +699,7 @@
 <div id="use" class="hidden"><b id="use-key">E</b> <span id="use-label"></span></div>
 
 <div id="hiding" class="hidden">
-  <span>You are inside. <b id="hiding-key">E</b> to come out.</span>
+  <span>You are inside. <span id="hiding-verb"></span><b id="hiding-key">E</b> to come out.</span>
 </div>
 
 <div id="tv" class="hidden"><div id="tv-body"></div></div>
@@ -915,6 +926,7 @@
       </div>
       <label class="check"><input type="checkbox" id="invert-y-touch">Swipe up to look down</label>
       <label class="check"><input type="checkbox" id="crouch-toggle-touch">Crouch stays down until you tap it again</label>
+      <label class="check"><input type="checkbox" id="te-landscape">Force landscape while playing</label>
       <button class="btn quiet" id="reset-touch">Put the buttons back where they started</button>
     </div>
 

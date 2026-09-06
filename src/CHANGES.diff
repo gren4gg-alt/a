@@ -1,12 +1,70 @@
 # Patch against the original project files.
-# src/: assets.js models.js material.js main.js ui.js settings.js   root: index.html
+# src/: assets.js models.js material.js main.js ui.js settings.js touch.js minigames.js boards.js interact.js difficulty.js
+# root: index.html
 
 --- /mnt/project/assets.js	1979-12-31 00:00:00.000000000 +0000
-+++ assets.js	2026-09-06 07:03:34.624088447 +0000
-@@ -101,3 +101,18 @@
++++ assets.js	2026-09-06 07:29:58.202833702 +0000
+@@ -101,3 +101,75 @@
  
  /** Set false to ignore assets/models entirely and use primitives. */
  export const USE_ASSET_MODELS = true;
++
++// ---------------------------------------------------------------------------
++// THE SIZE DIALS. Start here when something looks too small or too big.
++//
++// Three of them, in the order you should reach for them:
++//
++//   1. PROP_SIZE, just below. A plain multiplier per slot, applied on top of
++//      the automatic fit. 1.0 leaves it alone, 1.3 makes that one thing 30%
++//      bigger, 0.8 shrinks it. The collider is rebuilt from the result, so you
++//      cannot knock the hitbox out of alignment by turning these — change it,
++//      reload, look, change it again. This is the one to tinker with.
++//
++//   2. `height` in MODEL_ASSETS above. Only matters for slots the generator
++//      does NOT give a footprint to — the ghost, the door, the closet, the
++//      terminal, the knife, the relic, and the player bodies. For furniture it
++//      is only a starting measurement; the generator overrides it per piece.
++//
++//   3. MAX_STRETCH in models.js. How far one axis may deform away from the
++//      others to fill the footprint the generator reserved. 1.0 is strictly
++//      uniform. Raise it and boxy placeholders fill their space better; real
++//      furniture starts looking squashed.
++// ---------------------------------------------------------------------------
++
++/**
++ * Per-slot size multiplier. Anything not listed is 1.0.
++ *
++ * These are yours to play with. Nothing else in the game reads them, and
++ * getting one wrong makes that model the wrong size and nothing more.
++ */
++export const PROP_SIZE = {
++  chair:     1.0,
++  table:     1.0,
++  bed:       1.0,
++  shelf:     1.0,
++  cabinet:   1.0,
++  crate:     1.0,
++  lamp:      1.0,
++  rug:       1.0,
++  painting:  1.0,
++};
++
++/**
++ * Per-slot tint, as a hex colour. null leaves the model's own colour alone.
++ *
++ * This exists for models that come out white. glTF only carries a base colour
++ * and image textures — a material built out of procedural nodes has nothing to
++ * export, so the exporter writes a plain white base colour and the shading you
++ * set up in Blender is simply not in the file. The real fix is to bake those
++ * nodes down to an image texture and re-export. This is the stopgap: it will
++ * not give you wood grain, but it will stop a crate being the brightest thing
++ * in a dark house.
++ */
++export const MODEL_TINT = {
++  // crate:  0x8a6a44,
++  // table:  0x6f5334,
++  // shelf:  0x5f462c,
++};
 +
 +/**
 + * Objects to throw away as soon as a .glb is parsed.
@@ -23,13 +81,13 @@
 + */
 +export const STRIP_MODEL_OBJECTS = /^(text|label|placeholder)(\.\d+)?$/i;
 --- /mnt/project/models.js	1979-12-31 00:00:00.000000000 +0000
-+++ models.js	2026-09-06 07:03:43.920147654 +0000
++++ models.js	2026-09-06 07:30:07.648301740 +0000
 @@ -1,7 +1,7 @@
  import * as THREE from 'three';
  import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
  import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 -import { MODEL_ASSETS, USE_ASSET_MODELS } from './assets.js';
-+import { MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS } from './assets.js';
++import { MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS, PROP_SIZE } from './assets.js';
  
  // ---------------------------------------------------------------------------
  // Models.
@@ -140,7 +198,7 @@
   */
  export function fitInfo(slot, w, h, d) {
    const entry = cache.get(slot);
-@@ -142,21 +205,18 @@
+@@ -142,21 +205,25 @@
    const s = entry.size;
    if (s.x < 1e-4 || s.y < 1e-4 || s.z < 1e-4) return null;
  
@@ -161,20 +219,27 @@
 -  return { k, w: s.x * k, h: s.y * k, d: s.z * k };
 +  const base = h / s.y;
 +  const lo = base / MAX_STRETCH, hi = base * MAX_STRETCH;
-+  const kx = Math.min(hi, Math.max(lo, w / s.x));
-+  const kz = Math.min(hi, Math.max(lo, d / s.z));
++  let kx = Math.min(hi, Math.max(lo, w / s.x));
++  let ky = base;
++  let kz = Math.min(hi, Math.max(lo, d / s.z));
++
++  // Your dial (assets.js). Applied last and to all three axes together, so it
++  // never changes the shape — only how big the thing is. The caller rebuilds
++  // the collider from what comes out, so this cannot desync the hitbox.
++  const nudge = PROP_SIZE?.[slot] ?? 1;
++  if (nudge > 0 && nudge !== 1) { kx *= nudge; ky *= nudge; kz *= nudge; }
 +
 +  return {
 +    // Per axis. Callers do obj.scale.set(scale.x, scale.y, scale.z).
-+    scale: { x: kx, y: base, z: kz },
++    scale: { x: kx, y: ky, z: kz },
 +    // The uniform equivalent, for anything that still wants one number.
-+    k: base,
-+    w: s.x * kx, h: s.y * base, d: s.z * kz,
++    k: ky,
++    w: s.x * kx, h: s.y * ky, d: s.z * kz,
 +  };
  }
  
  export function instanceInBox(slot, w, h, d) {
-@@ -167,7 +227,7 @@
+@@ -167,7 +234,7 @@
    const k = Math.min(w / s.x, h / s.y, d / s.z);
    const copy = entry.root.clone(true);
    copy.scale.setScalar(k);
@@ -183,7 +248,7 @@
  }
  
  export function animationsFor(slot) { return cache.get(slot)?.animations ?? []; }
-@@ -184,6 +244,10 @@
+@@ -184,6 +251,10 @@
        const gltf = await loadOne(spec.url);
        const scene = gltf.scene ?? gltf.scenes?.[0];
        if (!scene) throw new Error('empty gltf');
@@ -195,8 +260,8 @@
        const fitted = fit(scene, spec.height);
        cache.set(slot, {
 --- /mnt/project/material.js	1979-12-31 00:00:00.000000000 +0000
-+++ material.js	2026-09-06 02:35:29.486754554 +0000
-@@ -355,3 +355,183 @@
++++ material.js	2026-09-06 07:30:22.164707531 +0000
+@@ -355,3 +355,198 @@
      `,
    });
  }
@@ -266,29 +331,41 @@
 +    this.cache = new Map();
 +  }
 +
-+  /** Swap every material in a subtree. Returns the object, for chaining. */
-+  apply(root) {
++  /**
++   * Swap every material in a subtree. Returns the object, for chaining.
++   *
++   * `tint` multiplies the model's own base colour. It exists for the models
++   * that arrive white: glTF carries a base colour and image textures, and
++   * nothing else, so a material built out of procedural nodes exports as plain
++   * white and the shading never leaves the modelling package. Baking those
++   * nodes to an image is the real answer; this stops a crate being the
++   * brightest object in the house in the meantime. See MODEL_TINT in
++   * assets.js.
++   */
++  apply(root, { tint = null } = {}) {
 +    if (!root) return root;
 +    root.traverse((o) => {
 +      if (!o.isMesh && !o.isSkinnedMesh && !o.isPoints && !o.isLine) return;
 +      o.material = Array.isArray(o.material)
-+        ? o.material.map((m) => this._for(m))
-+        : this._for(o.material);
++        ? o.material.map((m) => this._for(m, tint))
++        : this._for(o.material, tint);
 +    });
 +    return root;
 +  }
 +
-+  _for(source) {
++  _for(source, tint) {
 +    if (!source || source.isShaderMaterial) return source;
-+    const key = `${source.uuid}`;
++    // Two props sharing a source material but tinted differently are two
++    // materials, so the tint has to be part of the key.
++    const key = `${source.uuid}|${tint ?? 'none'}`;
 +    const hit = this.cache.get(key);
 +    if (hit) return hit;
-+    const made = this._build(source);
++    const made = this._build(source, tint);
 +    this.cache.set(key, made);
 +    return made;
 +  }
 +
-+  _build(source) {
++  _build(source, tint) {
 +    const m = new THREE.MeshBasicMaterial({
 +      map: source.map ?? null,
 +      color: source.color ? source.color.clone() : new THREE.Color(0xffffff),
@@ -304,6 +381,9 @@
 +      // be a second one on top of it.
 +      fog: false,
 +    });
++    if (tint !== null && tint !== undefined) {
++      m.color.multiply(new THREE.Color().setHex(tint, THREE.SRGBColorSpace));
++    }
 +    m.name = `prop:${source.name || 'unnamed'}`;
 +
 +    const u = this.house.uniforms;
@@ -381,8 +461,8 @@
 +  }
 +}
 --- /mnt/project/main.js	1979-12-31 00:00:00.000000000 +0000
-+++ main.js	2026-09-06 07:05:56.448880786 +0000
-@@ -9,14 +9,14 @@
++++ main.js	2026-09-06 07:33:47.925808696 +0000
+@@ -9,18 +9,19 @@
    wallGeometry, floorGeometry, ceilingGeometry, propGeometry, propColliders,
  } from './build.js';
  import { createBaker } from './bake.js';
@@ -396,18 +476,27 @@
  import { Interactables } from './interact.js';
 -import { instance as modelInstance, fitInfo, has as hasModel } from './models.js';
 +import { instance as modelInstance, fitInfo, has as hasModel, isPooled } from './models.js';
++import { MODEL_TINT } from './assets.js';
  import { startMinigame, GAME_NAMES } from './minigames.js';
  import { ceilingColliders, roomVariant } from './build.js';
  import { MenuScene } from './menuscene.js';
-@@ -57,6 +57,7 @@
+-import { TouchControls, isTouchDevice, lockLandscape, unlockOrientation, isPortrait } from './touch.js';
++import { TouchControls, isTouchDevice, lockLandscape, unlockOrientation, isPortrait, TOUCH_LABELS } from './touch.js';
+ import { BoardEditor } from './boards.js';
+ import { showRewarded, initAds, adsEnabled, menuCooldownLeft, markMenuAdWatched,
+          providerIsVerified, providerName } from './ads.js';
+@@ -57,8 +58,9 @@
    power: $('power'), powerName: $('power-name'), powerKey: $('power-key'), powerFill: $('power-fill'),
    talk: $('talk-indicator'),
    prompt: $('prompt'), promptKeys: $('prompt-keys'), vignette: $('vignette'),
 +  ingameMenu: $('ingame-menu'),
    use: $('use'), useLabel: $('use-label'), useKey: $('use-key'),
-   hiding: $('hiding'), hidingKey: $('hiding-key'),
+-  hiding: $('hiding'), hidingKey: $('hiding-key'),
++  hiding: $('hiding'), hidingKey: $('hiding-key'), hidingVerb: $('hiding-verb'),
    door: $('door-status'), doorCount: $('door-count'),
-@@ -71,6 +72,7 @@
+   tv: $('tv'), tvBody: $('tv-body'),
+   board: $('board'), boardBody: $('board-body'), boardRoom: $('board-room'),
+@@ -71,6 +73,7 @@
    vote: $('vote'), voteList: $('vote-list'), voteTimer: $('vote-timer'),
    giveUp: $('give-up'),
    touchEdit: $('touch-edit'), teWhich: $('te-which'), rotate: $('rotate'),
@@ -415,7 +504,7 @@
    voteWatch: $('vote-watch'), voteQuit: $('vote-quit'),
    carrying: $('carrying'), carryingName: $('carrying-name'),
    downed: $('downed'), downedTimer: $('downed-timer'), downedNote: $('downed-note'),
-@@ -92,13 +94,34 @@
+@@ -92,13 +95,34 @@
    // These three were only ever toggled by gameplay, so they sat on top of the
    // main menu: the click-to-look prompt, the door counter and the carry line.
    el.door.classList.toggle('hidden', !inGame);
@@ -453,7 +542,20 @@
  }
  
  // Screens that sit over the diorama rather than blacking it out.
-@@ -319,6 +342,9 @@
+@@ -123,7 +147,11 @@
+     renderer.render(charRoom.scene, charRoom.camera);
+     return;
+   }
+-  if (!menuScene || !DIORAMA.has(currentScreen)) return;
++  // touchReturnScreen means the editor has temporarily dropped us to
++  // currentScreen === null purely to expose the buttons. There is no house to
++  // look at from the menu, so keep the diorama up behind them.
++  const editingOverMenu = touchReturnScreen !== null && !run;
++  if (!menuScene || !(DIORAMA.has(currentScreen) || editingOverMenu)) return;
+   menuScene.update(dt);
+   menuScene.resize(window.innerWidth, window.innerHeight);
+   renderer.render(menuScene.scene, menuScene.camera);
+@@ -319,6 +347,9 @@
  
  function disposeRun() {
    if (!run) return;
@@ -463,7 +565,7 @@
    touchControls?.detach();
    if (TOUCH) { unlockOrientation(); el.rotate.classList.add('hidden'); }
    closeBoard();
-@@ -326,12 +352,17 @@
+@@ -326,12 +357,17 @@
    run.player.releaseInput();
    for (const r of run.remotes.values()) r.dispose(run.scene);
    run.scene.traverse((o) => {
@@ -486,7 +588,7 @@
    run = null;
  }
  
-@@ -475,29 +506,46 @@
+@@ -475,30 +511,47 @@
      roomMeshes.set(roomId, group);
    }
  
@@ -526,7 +628,7 @@
 +    // its own origin, so these two agree without an offset.
      obj.position.set(p.x, p.y ?? 0, p.z);
      obj.rotation.y = p.facing;
-+    propMats.apply(obj);
++    propMats.apply(obj, { tint: MODEL_TINT[p.kind] ?? null });
      roomMeshes.get(p.room)?.add(obj);
      modelled++;
    }
@@ -542,10 +644,12 @@
 -    pr.w = f.w; pr.h = f.h; pr.d = f.d; pr.fitScale = f.k;
 -  }
 -
-   const interact = new Interactables(scene, level);
+-  const interact = new Interactables(scene, level);
++  const interact = new Interactables(scene, level, difficulty);
    const grid = new ColliderGrid([
      ...buildColliders(wallBoxes),
-@@ -582,9 +630,7 @@
+     ...propColliders(level.props),
+@@ -582,9 +635,7 @@
      // all, and iOS supports neither. checkRotate() covers the failure.
      lockLandscape().finally(checkRotate);
    }
@@ -556,7 +660,7 @@
  
    material.uniforms.uFlashRange.value *= loadout.stats.flashlightRange;
  
-@@ -599,6 +645,10 @@
+@@ -599,6 +650,10 @@
    for (const p of session.roster) {
      if (p.id === session.localId) continue;
      const r = new RemotePlayer(scene, p.id, p.name, rosterIndex(p.id), !isHost(), p.char);
@@ -567,7 +671,7 @@
      const lo = new Loadout(characterById(p.char ?? DEFAULT_CHARACTER));
      r.loudness = lo.stats.loudnessScale;
      r.knifeDodge = lo.stats.knifeDodge;
-@@ -635,7 +685,7 @@
+@@ -635,7 +690,7 @@
    vis.update(player.pos.x, player.pos.z);
  
    run = {
@@ -576,7 +680,25 @@
      loadout, loadouts, interact, lootItems, lootMat, beadMat, exitMat, exitRoom, pillar,
      carrying: null, minigame: null, busyTerminals: new Map(), useTarget: null,
      sheltered: null,
-@@ -674,6 +724,8 @@
+@@ -657,10 +712,13 @@
+   el.carry.textContent = 'nothing';
+   el.seed.textContent = `seed ${level.seed}`;
+   el.powerName.textContent = loadout.char.ability;
+-  el.powerKey.textContent = keyLabel(settings.data.binds.power);
+-  el.reviveKey.textContent = keyLabel(settings.data.binds.interact);
+-  el.useKey.textContent = keyLabel(settings.data.binds.interact);
+-  el.hidingKey.textContent = keyLabel(settings.data.binds.interact);
++  el.powerKey.textContent = actionLabel('power');
++  el.reviveKey.textContent = actionLabel('interact');
++  el.useKey.textContent = actionLabel('interact');
++  el.hidingKey.textContent = actionLabel('interact');
++  // A key is pressed and a button is tapped, and the sentence has to read
++  // right either way.
++  el.hidingVerb.textContent = TOUCH ? 'Tap ' : '';
+   el.doorCount.textContent = `0/${level.holders.length}`;
+   el.promptKeys.innerHTML = promptText();
+ 
+@@ -674,9 +732,24 @@
      show(null);
      lastFrame = performance.now();
      rafId = requestAnimationFrame(frame);
@@ -585,7 +707,58 @@
    }, isNet() ? 200 : 450);
  }
  
-@@ -1131,6 +1183,7 @@
++/**
++ * What to call an action in the HUD, for the device actually in their hands.
++ *
++ * On a keyboard this is the bind, which is what it always was. On a phone it
++ * is the caption printed on the on-screen button, because "E to pick someone
++ * up" on a device with no E is worse than no prompt at all — it reads like the
++ * game has not noticed what it is running on.
++ */
++function actionLabel(id) {
++  if (TOUCH) return TOUCH_LABELS[id] ?? '';
++  return keyLabel(settings.data.binds[id]);
++}
++
+ function promptText() {
+   const b = settings.data.binds;
+   const k = (id) => `<b>${keyLabel(b[id])}</b>`;
+@@ -966,6 +1039,7 @@
+   run.boardEditor = null;
+   el.boardBody.innerHTML = '';
+   el.board.classList.add('hidden');
++  relockPointer();   // same reason as the terminal
+ }
+ 
+ // -- terminals -------------------------------------------------------------
+@@ -994,6 +1068,26 @@
+   run.minigame = null;
+   el.tv.classList.add('hidden');
+   setTerminalBusy(id, false);
++  // Opening the terminal let the mouse go so it could click the puzzle.
++  // Closing it has to take the mouse back, or you finish a screen and land in
++  // the room looking at the click-to-look overlay as though you had paused.
++  relockPointer();
++}
++
++/**
++ * Ask for the pointer back, if there is anything to point at.
++ *
++ * Browsers only grant this inside a user gesture, which is why every caller is
++ * on the tail of a click. A refusal is fine and expected — the click-anywhere
++ * handler further down is the fallback — so the rejection is swallowed rather
++ * than reported.
++ */
++function relockPointer() {
++  if (TOUCH || !run || run.over) return;
++  if (currentScreen !== null || document.pointerLockElement) return;
++  if (run.minigame || run.boardOpen || run.player.downed) return;
++  const r = canvas.requestPointerLock();
++  if (r && typeof r.catch === 'function') r.catch(() => {});
+ }
+ 
+ function setTerminalBusy(id, on) {
+@@ -1131,6 +1225,7 @@
    if (run.boardOpen) closeBoard();
    audio.hit();
    el.downed.classList.remove('hidden');
@@ -593,7 +766,16 @@
    el.downedTimer.textContent = String(Math.ceil(
      run.downTimers.get(session.localId) ?? CONFIG.bleedOutSeconds,
    ));
-@@ -1157,6 +1210,7 @@
+@@ -1140,7 +1235,7 @@
+   refreshAdRevive();
+   const canSelfRevive = run.loadout.char.id === 'nurse' && run.loadout.ready;
+   el.downedNote.textContent = canSelfRevive
+-    ? `You can still get yourself up. ${keyLabel(settings.data.binds.power)}.`
++    ? `You can still get yourself up. ${actionLabel('power')}.`
+     : isNet() ? 'Someone has to come and pick you up.'
+               : 'No one is coming for you. Alone, this is how it ends.';
+ }
+@@ -1157,6 +1252,7 @@
  function applyReviveLocal() {
    run.player.downed = false;
    el.downed.classList.add('hidden');
@@ -601,7 +783,7 @@
  }
  
  // ---------------------------------------------------------------------------
-@@ -1374,6 +1428,12 @@
+@@ -1374,6 +1470,12 @@
    lastFrame = now;
    run.time += dt;
  
@@ -614,7 +796,16 @@
    if (!run.over && run.begun) {
      accumulator += dt;
      let steps = 0;
-@@ -2435,6 +2495,9 @@
+@@ -2224,7 +2326,7 @@
+   el.charPassive.textContent = chosen.passive;
+   el.charAbility.textContent = chosen.ability;
+   el.charAbilityText.textContent = chosen.abilityText;
+-  el.charKey.textContent = keyLabel(settings.data.binds.power) +
++  el.charKey.textContent = actionLabel('power') +
+     (chosen.cooldown ? ` · ${chosen.cooldown}s cooldown` : ' · once per run');
+ 
+   el.charList.innerHTML = '';
+@@ -2435,6 +2537,9 @@
    isTouch: TOUCH,
    onChange: () => { applyGraphics(); applyAudio(); if (run) el.promptKeys.innerHTML = promptText(); },
    onTest: (key) => { audio.resume(); if (key === 'sfx' || key === 'master') audio.pickup(60); },
@@ -624,7 +815,7 @@
  });
  
  $('go-solo').addEventListener('click', () => {
-@@ -2478,6 +2541,16 @@
+@@ -2478,6 +2583,16 @@
    settingsUI.openTab('controls');
    show('settings');
  });
@@ -641,7 +832,7 @@
  $('about-back').addEventListener('click', () => buildMenu());
  $('mp-back').addEventListener('click', () => buildMenu());
  $('modes-back').addEventListener('click', () => (isNet() ? renderSelect() : buildMenu()));
-@@ -2629,8 +2702,13 @@
+@@ -2629,8 +2744,26 @@
  // Moving the on-screen controls
  // ---------------------------------------------------------------------------
  
@@ -649,19 +840,38 @@
 +// True while the editor is standing in for a screen rather than sitting on top
 +// of one, i.e. the walkthrough the first house on a phone opens with.
 +let touchFirstRun = false;
++// Which screen to put back when the editor closes, or null if we were already
++// looking at the world.
++let touchReturnScreen = null;
 +
 +function openTouchEditor({ firstRun = false } = {}) {
    if (!TOUCH) return;
 +  touchFirstRun = firstRun;
++
++  // Get out of the way of the thing being edited.
++  //
++  // The on-screen buttons live at z-index 14 and every settings screen is at
++  // 30, so opening this from Settings put the panel in front of buttons that
++  // were themselves behind an opaque screen — you could see the sliders and
++  // nothing to point them at. Drop to the world (or the menu backdrop), and
++  // put the screen back on the way out.
++  touchReturnScreen = currentScreen;
++  if (currentScreen !== null) show(null);
    touchControls = touchControls ?? new TouchControls($('touch'));
    touchControls.applyLayout();
    touchControls.setEditMode(true);
-@@ -2641,17 +2719,66 @@
+@@ -2641,29 +2774,85 @@
    };
    $('touch').classList.remove('hidden');
    el.touchEdit.classList.remove('hidden');
 -  el.teWhich.textContent = 'Nothing selected';
 -  syncTouchSliders();
++  // Clear anything a previous drag left behind, so the panel always opens
++  // somewhere sensible rather than wherever it was last shoved.
++  el.touchEdit.style.left = '';
++  el.touchEdit.style.top = '';
++  el.touchEdit.style.bottom = '';
++  el.touchEdit.style.transform = '';
 +  el.touchEdit.classList.toggle('first-run', firstRun);
 +  el.touchFirst.classList.toggle('hidden', !firstRun);
 +  el.teDone.textContent = firstRun ? 'Save and play' : 'Done';
@@ -688,6 +898,11 @@
 +  el.touchEdit.classList.remove('first-run');
 +  el.touchFirst.classList.add('hidden');
 +  el.teDone.textContent = 'Done';
++  // Back to wherever we came from. show() re-toggles the touch layer, the HUD
++  // and the corner buttons for us, so this has to come before we read them.
++  if (touchReturnScreen !== null) show(touchReturnScreen);
++  touchReturnScreen = null;
++
    $('touch').classList.toggle('hidden', !(TOUCH && currentScreen === null));
 +  const playing = currentScreen === null && run && !run.over;
 +  el.ingameMenu.classList.toggle('hidden', !playing);
@@ -724,7 +939,100 @@
 +
  function syncTouchSliders() {
    const t = settings.data.touch;
-   $('te-scale').value = String(Math.round(t.scale * 100));
+-  $('te-scale').value = String(Math.round(t.scale * 100));
+-  $('te-scale-value').textContent = `${$('te-scale').value}%`;
+   $('te-opacity').value = String(Math.round(t.opacity * 100));
+   $('te-opacity-value').textContent = `${$('te-opacity').value}%`;
+-  $('te-stick').value = String(t.stickSize);
+-  $('te-stick-value').textContent = `${t.stickSize}px`;
+   $('te-landscape').checked = !!t.lockLandscape;
+   const sel = touchControls?.selected;
+   $('te-size').value = String(sel ? t.layout[sel].size : 70);
+-  $('te-size-value').textContent = `${$('te-size').value}px`;
++  $('te-size-value').textContent = sel ? `${$('te-size').value}px` : '—';
+ }
+ 
+ $('te-size').addEventListener('input', (e) => {
+@@ -2673,21 +2862,11 @@
+   $('te-size-value').textContent = `${e.target.value}px`;
+   touchControls.applyLayout();
+ });
+-$('te-scale').addEventListener('input', (e) => {
+-  settings.data.touch.scale = Number(e.target.value) / 100;
+-  $('te-scale-value').textContent = `${e.target.value}%`;
+-  touchControls?.applyLayout();
+-});
+ $('te-opacity').addEventListener('input', (e) => {
+   settings.data.touch.opacity = Number(e.target.value) / 100;
+   $('te-opacity-value').textContent = `${e.target.value}%`;
+   touchControls?.applyLayout();
+ });
+-$('te-stick').addEventListener('input', (e) => {
+-  settings.data.touch.stickSize = Number(e.target.value);
+-  $('te-stick-value').textContent = `${e.target.value}px`;
+-  touchControls?.applyLayout();
+-});
+ $('te-landscape').addEventListener('change', (e) => {
+   settings.data.touch.lockLandscape = e.target.checked;
+   settings.save();
+@@ -2698,6 +2877,57 @@
+   touchControls?.applyLayout();
+   syncTouchSliders();
+ });
++
++// ---------------------------------------------------------------------------
++// Dragging the editor panel itself.
++//
++// It covers the buttons it is there to arrange — unavoidable on a phone-sized
++// screen — so the answer is to let it be shoved out of the way rather than to
++// guess a corner that is always free. Pointer events, so a mouse and a thumb
++// take the same path, and clamped to the viewport so it can never be parked
++// somewhere it cannot be dragged back from.
++// ---------------------------------------------------------------------------
++
++(() => {
++  const panel = el.touchEdit;
++  const grip = $('te-grip');
++  let drag = null;
++
++  grip.addEventListener('pointerdown', (e) => {
++    const r = panel.getBoundingClientRect();
++    drag = { id: e.pointerId, dx: e.clientX - r.left, dy: e.clientY - r.top };
++    grip.setPointerCapture?.(e.pointerId);
++    grip.classList.add('dragging');
++    // The first-run variant is centred with a transform. Once it is being
++    // dragged it is positioned outright, or the transform fights every move.
++    panel.classList.remove('first-run');
++    panel.style.transform = 'none';
++    panel.style.left = `${r.left}px`;
++    panel.style.top = `${r.top}px`;
++    panel.style.bottom = 'auto';
++    e.preventDefault();
++  });
++
++  grip.addEventListener('pointermove', (e) => {
++    if (!drag || e.pointerId !== drag.id) return;
++    const r = panel.getBoundingClientRect();
++    // Keep the grip itself reachable: at least a strip of the panel stays on
++    // screen on every side.
++    const maxX = window.innerWidth - 44;
++    const maxY = window.innerHeight - 30;
++    panel.style.left = `${Math.min(maxX, Math.max(44 - r.width, e.clientX - drag.dx))}px`;
++    panel.style.top = `${Math.min(maxY, Math.max(0, e.clientY - drag.dy))}px`;
++  });
++
++  const endDrag = (e) => {
++    if (!drag || e.pointerId !== drag.id) return;
++    drag = null;
++    grip.classList.remove('dragging');
++  };
++  grip.addEventListener('pointerup', endDrag);
++  grip.addEventListener('pointercancel', endDrag);
++})();
++
+ $('open-touch-edit').addEventListener('click', openTouchEditor);
+ $('open-touch-edit').classList.toggle('hidden', !TOUCH);
+ 
 --- /mnt/project/ui.js	1979-12-31 00:00:00.000000000 +0000
 +++ ui.js	2026-09-06 07:04:42.197157038 +0000
 @@ -10,12 +10,19 @@
@@ -909,8 +1217,409 @@
      this.data.touch.scale = 1.0;
      this.data.touch.opacity = 0.45;
      this.data.touch.stickSize = 132;
+--- /mnt/project/touch.js	1979-12-31 00:00:00.000000000 +0000
++++ touch.js	2026-09-06 07:32:18.089771238 +0000
+@@ -23,7 +23,7 @@
+ const DEAD_ZONE = 0.14;
+ 
+ /** action, label, and whether holding it means anything. */
+-const BUTTONS = [
++export const BUTTONS = [
+   { id: 'interact',   label: 'USE',     cls: 'primary' },
+   { id: 'power',      label: 'ABILITY' },
+   { id: 'crouch',     label: 'CROUCH',  hold: true },
+@@ -32,6 +32,16 @@
+   { id: 'talk',       label: 'TALK',    hold: true },
+ ];
+ 
++/**
++ * What each action is CALLED on a phone.
++ *
++ * The HUD used to write out the keyboard bind for everything — "E to pick
++ * someone up", "Flare · Q" — on a device with no E and no Q. The on-screen
++ * button already has a caption; this is that caption, so what the world tells
++ * you to press matches what is under your thumb.
++ */
++export const TOUCH_LABELS = Object.fromEntries(BUTTONS.map((b) => [b.id, b.label]));
++
+ // ---------------------------------------------------------------------------
+ // Orientation.
+ //
+--- /mnt/project/minigames.js	1979-12-31 00:00:00.000000000 +0000
++++ minigames.js	2026-09-06 07:31:48.352374087 +0000
+@@ -49,7 +49,14 @@
+     done = true;
+     status.textContent = 'Done.';
+     frame.classList.add('mg-won');
+-    setTimeout(() => opts.onWin(), 550);
++    // Called straight away, NOT after a flourish on a timer.
++    //
++    // Closing the terminal has to recapture the mouse, and a browser will only
++    // hand the pointer lock back inside the gesture that asked for it. Half a
++    // second later that gesture has expired, the lock is refused, and the
++    // player is dumped back into the room looking at the click-to-look screen
++    // as if they had paused. The win animation is not worth that.
++    opts.onWin();
+   };
+ 
+   const builders = { tiles: buildTiles, sums: buildSums, blocks: buildBlocks };
+@@ -199,14 +206,21 @@
+ // ---------------------------------------------------------------------------
+ // 3. Match the plate — swap blocks until the row matches the picture above it.
+ //
+-// Two clicks to swap. Six blocks is enough to need thought and few enough to
+-// take in at a glance when you are already panicking.
++// Two clicks to swap. Nine blocks: long enough that you cannot solve it by
++// accident, short enough to take in at a glance when you are already
++// panicking. The row wraps on a narrow screen rather than shrinking the
++// blocks below what a thumb can hit.
+ // ---------------------------------------------------------------------------
+ 
+-const BLOCK_COLOURS = ['#c2704a', '#4a7fc2', '#c2b04a', '#6ac28a', '#a06ac2', '#c24a6a'];
++const BLOCK_COLOURS = [
++  '#c2704a', '#4a7fc2', '#c2b04a', '#6ac28a', '#a06ac2',
++  '#c24a6a', '#4ac2b4', '#c2884a', '#8ac24a',
++];
+ 
+ function buildBlocks(body, status, win) {
+-  const N = 5;
++  // Nine columns. BLOCK_COLOURS must have at least this many entries — every
++  // block is a different colour, so the two rows can be compared at a glance.
++  const N = 9;
+   const target = [...Array(N).keys()];
+   let current = shuffled(target);
+   while (current.every((v, i) => v === target[i])) current = shuffled(target);
+--- /mnt/project/boards.js	1979-12-31 00:00:00.000000000 +0000
++++ boards.js	2026-09-06 07:33:31.998026687 +0000
+@@ -229,78 +229,149 @@
+ // wants from them.
+ // ---------------------------------------------------------------------------
+ 
+-const NOTICE = [
+-  ['title', 'IF YOU ARE READING THIS'],
+-  ['rule', 'The door out wants four things. Find them.'],
+-  ['rule', 'Each one sits by a screen. Beat the screen, take the object,'],
+-  ['rule', 'carry it back and set it in one of the four holders.'],
+-  ['gap', ''],
+-  ['warn', 'THE SCREENS ARE LOUD. Everything in here hears them.'],
+-  ['rule', 'Walk away from one at any time. Esc, or click off it.'],
+-  ['gap', ''],
+-  ['warn', 'THIS ROOM IS THE ONE PLACE THEY WILL NOT COME.'],
+-  ['rule', 'Stand in here and nothing out there knows you exist.'],
+-  ['gap', ''],
+-  ['rule', 'It cannot see through walls. It cannot hear you standing still.'],
+-  ['rule', 'Running is loud. On a bad night, so is talking.'],
+-  ['gap', ''],
+-  ['rule', 'Closets hide one person. A lit peephole means taken.'],
+-  ['rule', 'Crawl holes are too low for it to follow. Crouch.'],
+-  ['gap', ''],
+-  ['rule', 'If it puts you down, someone has to come and lift you up.'],
+-  ['warn', 'NOBODY LEAVES UNTIL EVERYONE IS AT THE DOOR.'],
+-];
++/**
++ * The notice by the front door, as a list of lines.
++ *
++ * Built per house rather than sat in a constant, because half of what it says
++ * is only true on some of them: a Quiet house has no traps to warn about and
++ * cannot hear you talking, and telling a first-timer otherwise is worse than
++ * saying nothing. The board sizes itself to whatever comes back, so adding a
++ * line here is the whole job — no measuring, no re-cutting the plane.
++ *
++ * @param difficulty an entry from DIFFICULTIES, or nothing for the common set
++ * @param level      the generated level, for the counts it can quote exactly
++ */
++export function noticeLines(difficulty = null, level = null) {
++  const relics = level?.holders?.length ?? 4;
++  const ghosts = level?.ghostCount ?? 0;
++  const out = [
++    ['title', 'IF YOU ARE READING THIS'],
++    ['rule', `The door out wants ${relics === 4 ? 'four' : relics} things. Find them.`],
++    ['rule', 'Each one sits by a screen. Beat the screen, take the object,'],
++    ['rule', 'carry it back and set it in one of the holders.'],
++    ['gap', ''],
++    ['warn', 'THE SCREENS ARE LOUD. Everything in here hears them.'],
++    ['rule', 'Walk away from one at any time \u2014 you lose only your progress.'],
++    ['gap', ''],
++    ['warn', 'THIS ROOM IS THE ONE PLACE THEY WILL NOT COME.'],
++    ['rule', 'Stand in here and nothing out there knows you exist.'],
++    ['gap', ''],
++    ['rule', 'It cannot see through walls. It cannot hear you standing still.'],
++    ['rule', 'Running is loud.'],
++  ];
++
++  // Only true on the houses where it is true.
++  if (difficulty?.hearsVoice) {
++    out.push(['warn', 'IT CAN HEAR YOUR VOICE IN HERE. Talking carries.']);
++  }
++  out.push(['gap', '']);
++  out.push(['rule', 'Closets hide one person. A lit peephole means taken.']);
++  out.push(['rule', 'Crawl holes are too low for it to follow. Crouch.']);
++
++  if (difficulty?.trapInterval) {
++    out.push(['gap', '']);
++    out.push(['warn', 'IT LEAVES THINGS ON THE FLOOR. Watch where you run.']);
++  }
++  if (ghosts > 1) {
++    out.push(['gap', '']);
++    out.push(['rule', `There is more than one of them. We counted ${ghosts}.`]);
++  }
++
++  out.push(['gap', '']);
++  out.push(['rule', 'If it puts you down, someone has to come and lift you up.']);
++  out.push(['warn', 'NOBODY LEAVES UNTIL EVERYONE IS AT THE DOOR.']);
++  return out;
++}
++
++// How each kind of line is drawn, and how much room it needs underneath.
++const NOTICE_STYLE = {
++  title: { font: '700 40px "IBM Plex Sans", system-ui, sans-serif', fill: '#2e2415', after: 50, rule: true },
++  warn:  { font: '600 25px "IBM Plex Sans", system-ui, sans-serif', fill: '#8c2f1c', after: 34 },
++  rule:  { font: '300 25px "IBM Plex Sans", system-ui, sans-serif', fill: '#3a2f1d', after: 32 },
++  gap:   { after: 16 },
++};
++
++const NOTICE_PAD = 52;       // left and right margin inside the border
++const NOTICE_TOP = 92;       // baseline of the first line
++const NOTICE_BOTTOM = 46;    // clear space under the last line
++
++/**
++ * Draw the notice, sized to its own contents.
++ *
++ * The old version painted into a hardcoded 900x640 and was hung on a
++ * hardcoded 1.5 x 1.07 plane, so any edit to the text either overflowed the
++ * canvas or left a slab of blank paper. Now the canvas is measured from the
++ * lines themselves and the caller is handed the aspect ratio to cut the plane
++ * to, which means adding a line is a one-line change and nothing else moves.
++ *
++ * @returns {{texture: THREE.CanvasTexture, width: number, height: number, aspect: number}}
++ */
++export function createNoticeTexture(lines = noticeLines()) {
++  const measure = document.createElement('canvas').getContext('2d');
++
++  // Pass one: how wide does the widest line want to be, and how tall is the
++  // stack? Nothing is drawn yet.
++  let widest = 0;
++  let height = NOTICE_TOP;
++  for (const [kind, text] of lines) {
++    const st = NOTICE_STYLE[kind] ?? NOTICE_STYLE.rule;
++    if (st.font && text) {
++      measure.font = st.font;
++      widest = Math.max(widest, measure.measureText(text).width);
++    }
++    height += st.after;
++    if (st.rule) height += 22;
++  }
++  height += NOTICE_BOTTOM;
++
++  // Round up to keep the texture on friendly numbers, and hold a sane floor so
++  // a very short notice is still a readable object on a wall.
++  const width = Math.max(700, Math.ceil((widest + NOTICE_PAD * 2) / 16) * 16);
++  height = Math.max(360, Math.ceil(height / 16) * 16);
+ 
+-export function createNoticeTexture() {
+   const canvas = document.createElement('canvas');
+-  canvas.width = 900;
+-  canvas.height = 640;
++  canvas.width = width;
++  canvas.height = height;
+   const ctx = canvas.getContext('2d');
+ 
+   ctx.fillStyle = '#cfc3a6';
+-  ctx.fillRect(0, 0, 900, 640);
++  ctx.fillRect(0, 0, width, height);
+ 
+-  // Age it, or it reads as a UI panel bolted to a wall.
++  // Age it, or it reads as a UI panel bolted to a wall. Blot count follows the
++  // area so a tall notice is not noticeably cleaner than a short one.
++  const blots = Math.round((width * height) / 4800);
+   ctx.globalAlpha = 0.10;
+   ctx.fillStyle = '#6a5636';
+-  for (let i = 0; i < 120; i++) {
++  for (let i = 0; i < blots; i++) {
+     const r = 8 + Math.random() * 46;
+     ctx.beginPath();
+-    ctx.arc(Math.random() * 900, Math.random() * 640, r, 0, Math.PI * 2);
++    ctx.arc(Math.random() * width, Math.random() * height, r, 0, Math.PI * 2);
+     ctx.fill();
+   }
+   ctx.globalAlpha = 1;
+ 
+   ctx.strokeStyle = '#6a5a3e';
+   ctx.lineWidth = 5;
+-  ctx.strokeRect(18, 18, 864, 604);
++  ctx.strokeRect(18, 18, width - 36, height - 36);
+ 
+-  let y = 92;
+-  for (const [kind, text] of NOTICE) {
+-    if (kind === 'gap') { y += 16; continue; }
+-    if (kind === 'title') {
+-      ctx.fillStyle = '#2e2415';
+-      ctx.font = '700 40px "IBM Plex Sans", system-ui, sans-serif';
+-      ctx.fillText(text, 52, y);
+-      y += 50;
++  let y = NOTICE_TOP;
++  for (const [kind, text] of lines) {
++    const st = NOTICE_STYLE[kind] ?? NOTICE_STYLE.rule;
++    if (st.font && text) {
++      ctx.fillStyle = st.fill;
++      ctx.font = st.font;
++      ctx.fillText(text, NOTICE_PAD, y);
++    }
++    y += st.after;
++    if (st.rule) {
+       ctx.fillStyle = '#6a5a3e';
+-      ctx.fillRect(52, y - 22, 796, 3);
++      ctx.fillRect(NOTICE_PAD, y - 22, width - NOTICE_PAD * 2, 3);
+       y += 22;
+-    } else if (kind === 'warn') {
+-      ctx.fillStyle = '#8c2f1c';
+-      ctx.font = '600 25px "IBM Plex Sans", system-ui, sans-serif';
+-      ctx.fillText(text, 52, y);
+-      y += 34;
+-    } else {
+-      ctx.fillStyle = '#3a2f1d';
+-      ctx.font = '300 25px "IBM Plex Sans", system-ui, sans-serif';
+-      ctx.fillText(text, 52, y);
+-      y += 32;
+     }
+   }
+ 
+   const t = new THREE.CanvasTexture(canvas);
+   t.colorSpace = THREE.SRGBColorSpace;
+   t.anisotropy = 4;
+-  return t;
++  return { texture: t, width, height, aspect: width / height };
+ }
+--- /mnt/project/interact.js	1979-12-31 00:00:00.000000000 +0000
++++ interact.js	2026-09-06 07:34:28.699468560 +0000
+@@ -2,7 +2,7 @@
+ import { createGlowMaterial } from './material.js';
+ import { instance as modelInstance, has as hasModel } from './models.js';
+ import { CONFIG } from './level.js';
+-import { createBoard, applyStroke, createNoticeTexture } from './boards.js';
++import { createBoard, applyStroke, createNoticeTexture, noticeLines } from './boards.js';
+ 
+ // ---------------------------------------------------------------------------
+ // Things you can walk up to and use.
+@@ -17,9 +17,12 @@
+ export const USE_RANGE = 1.9;
+ 
+ export class Interactables {
+-  constructor(scene, level) {
++  constructor(scene, level, difficulty = null) {
+     this.scene = scene;
+     this.level = level;
++    // Only the notice uses it, and only to leave out warnings that are not
++    // true of this house.
++    this.difficulty = difficulty;
+     this.closets = [];
+     this.terminals = [];
+     this.holders = [];
+@@ -72,20 +75,47 @@
+     const n = this.level.notice;
+     if (!n) return;
+     const group = new THREE.Group();
++    // Hung so the top edge stays at a constant height whatever the board
++    // grows to; a notice that got taller downwards would end up in the
++    // skirting board. Set after the size is known, further down.
+     group.position.set(n.x, 1.6, n.z);
+     group.rotation.y = n.facing + Math.PI;   // same half-turn as the boards
+-    const geo = new THREE.PlaneGeometry(1.5, 1.07);
+-    const mat = new THREE.MeshBasicMaterial({ map: createNoticeTexture() });
++    // Cut the paper to the words rather than the words to the paper. The
++    // notice sizes its own canvas, hands back the aspect, and the plane is
++    // built from that — so a new rule, or one dropped because this house has
++    // no traps, changes the shape of the thing on the wall and nothing else.
++    const notice = createNoticeTexture(noticeLines(this.difficulty, this.level));
++
++    // A fixed number of canvas pixels per metre, NOT a fixed plane size.
++    //
++    // Pinning the height and deriving the width from the aspect would keep the
++    // board the same size and shrink the type every time a rule was added,
++    // which is the failure this was supposed to end. At a constant scale the
++    // lettering is always the same height on the wall and the paper grows to
++    // hold it. Capped so a long notice cannot reach the ceiling; past the cap
++    // it does start shrinking, because a board through the floor is worse.
++    const PX_PER_METRE = 700;
++    let W = notice.width / PX_PER_METRE;
++    let H = notice.height / PX_PER_METRE;
++    const MAX_H = 2.0, MAX_W = 2.6;
++    const squeeze = Math.min(1, MAX_H / H, MAX_W / W);
++    W *= squeeze; H *= squeeze;
++    const geo = new THREE.PlaneGeometry(W, H);
++    const mat = new THREE.MeshBasicMaterial({ map: notice.texture });
+     const face = new THREE.Mesh(geo, mat);
+     face.position.z = 0.02;
+     group.add(face);
+ 
+     // A thin board behind it, so it reads as pinned up rather than floating.
+     const backing = new THREE.Mesh(
+-      new THREE.BoxGeometry(1.62, 1.19, 0.05),
++      new THREE.BoxGeometry(W + 0.12, H + 0.12, 0.05),
+       createGlowMaterial(0x2a2018, { additive: false, depthWrite: true, gain: 0.5 }),
+     );
+     group.add(backing);
++    // Centre it on the height a person reads at, but never let the bottom
++    // edge dip below the skirting.
++    group.position.y = Math.max(1.5, 0.55 + H / 2);
++
+     this.scene.add(group);
+     this.notice = group;
+   }
+--- /mnt/project/difficulty.js	1979-12-31 00:00:00.000000000 +0000
++++ difficulty.js	2026-09-06 07:32:59.207734816 +0000
+@@ -22,7 +22,12 @@
+ // A fixed count barely registered once houses got large: you could walk for
+ // minutes without meeting anything.
+ //
+-// closetShare and boardShare are fractions of the room count. Closets scale
++// closetShare and boardShare are fractions of the room count. boardShare went
++// up by about a third across every house: a chalkboard is the only way to
++// leave anything for someone you are separated from, and at the old rate you
++// could cross half a house without passing one.
++//
++// Closets scale
+ // hard with difficulty: at one ghost per seven rooms there has to be somewhere
+ // to get off the floor, and the harder houses are where you need it.
+ //
+@@ -34,7 +39,7 @@
+   {
+     id: 'quiet',
+     closetShare: 0.1,
+-    boardShare: 0.12,
++    boardShare: 0.16,
+     ghostShare: 0.15,
+     hearsVoice: false,
+     label: 'Quiet',
+@@ -54,7 +59,7 @@
+   {
+     id: 'restless',
+     closetShare: 0.15,
+-    boardShare: 0.15,
++    boardShare: 0.20,
+     ghostShare: 0.15,
+     hearsVoice: false,
+     label: 'Restless',
+@@ -74,7 +79,7 @@
+   {
+     id: 'hunted',
+     closetShare: 0.25,
+-    boardShare: 0.18,
++    boardShare: 0.24,
+     ghostShare: 0.15,
+     hearsVoice: true,
+     label: 'Hunted',
+@@ -94,7 +99,7 @@
+   {
+     id: 'starving',
+     closetShare: 0.3,
+-    boardShare: 0.22,
++    boardShare: 0.30,
+     ghostShare: 0.15,
+     hearsVoice: true,
+     label: 'Starving',
 --- /mnt/project/index.html	1979-12-31 00:00:00.000000000 +0000
-+++ index.html	2026-09-06 07:05:03.415932405 +0000
++++ index.html	2026-09-06 07:32:45.978249601 +0000
 @@ -250,7 +250,7 @@
    #revive-track { width: 9rem; height: 2px; background: rgba(232,185,168,0.2); }
    #revive-bar { height: 100%; width: 0; background: var(--blood); }
@@ -920,7 +1629,20 @@
              justify-items: center; gap: 0.5rem; text-align: center; pointer-events: none;
              background: rgba(40,4,2,0.35); }
    #downed strong { font-size: 1.45rem; font-weight: 300; letter-spacing: 0.22em; color: var(--blood); }
-@@ -318,12 +318,23 @@
+@@ -311,19 +311,34 @@
+            border: 1px solid rgba(143,214,255,0.28); padding: 0.4rem 1rem; }
+   .mg-go:hover { border-color: #8fd6ff; }
+ 
+-  .mg-blocks { display: flex; gap: 0.35rem; }
+-  .mg-block { width: 2.6rem; height: 2.6rem; border: 1px solid rgba(0,0,0,0.4);
++  /* Nine across. A fixed row would run off a phone held sideways, so it wraps
++     and both rows wrap the same way — the two stay readable against each
++     other, which is the whole puzzle. */
++  .mg-blocks { display: flex; flex-wrap: wrap; justify-content: center;
++               gap: 0.3rem; max-width: 26rem; }
++  .mg-block { width: 2.4rem; height: 2.4rem; border: 1px solid rgba(0,0,0,0.4);
+               padding: 0; cursor: pointer; }
+   .mg-target .mg-block { cursor: default; opacity: 0.85; }
    .mg-block.picked { outline: 2px solid #8fd6ff; outline-offset: 2px; }
    .mg-divider { width: 100%; height: 1px; background: rgba(143,214,255,0.14); }
  
@@ -945,10 +1667,43 @@
    #fullscreen-settings { width: auto; height: auto; position: static; border-radius: 0;
      display: inline-block; padding: 0.55rem 1.1rem; font-size: inherit; }
  
-@@ -472,6 +483,20 @@
-   #te-which { color: var(--exit); font-size: 0.8rem; min-height: 1.1em; }
-   #te-buttons { display: flex; gap: 0.5rem; }
+@@ -461,16 +476,42 @@
+   #touch.editing .tc-look, #touch.editing .tc-stickzone { pointer-events: none; }
  
+   /* ---- control customiser ---- */
++  /* ---- control customiser ----
++     Small on purpose. It sits on top of the buttons you are trying to see, so
++     it takes as little of the screen as it can and you can drag it out of the
++     way by its grip when it is still in the wrong place. */
+   #touch-edit { position: fixed; left: 1rem; top: 1rem; z-index: 34;
+-                width: min(19rem, 46vw); display: grid; gap: 0.6rem;
+-                padding: 0.9rem 1rem; background: rgba(5,7,10,0.92);
+-                border: 1px solid var(--line); }
+-  #touch-edit h2 { font-size: 0.92rem; }
+-  #touch-edit p { color: var(--ink-dim); font-size: 0.76rem; line-height: 1.5; }
+-  #touch-edit .field { gap: 0.3rem 0.8rem; }
+-  #touch-edit .field label { font-size: 0.8rem; }
+-  #te-which { color: var(--exit); font-size: 0.8rem; min-height: 1.1em; }
+-  #te-buttons { display: flex; gap: 0.5rem; }
++                width: 14.5rem; max-width: 62vw; display: grid; gap: 0.35rem;
++                padding: 0.5rem 0.6rem 0.6rem; background: rgba(5,7,10,0.94);
++                border: 1px solid var(--line); border-radius: 4px;
++                touch-action: none; }
++  #te-grip { display: flex; align-items: center; gap: 0.4rem; cursor: grab;
++             margin: -0.5rem -0.6rem 0.1rem; padding: 0.42rem 0.6rem;
++             font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
++             color: var(--ink-dim); background: rgba(207,196,180,0.06);
++             border-bottom: 1px solid var(--line); user-select: none; }
++  #te-grip.dragging { cursor: grabbing; }
++  #te-grip-dots { letter-spacing: -0.15em; opacity: 0.55; }
++  #touch-edit .field { gap: 0.1rem 0.6rem; }
++  #touch-edit .field label { font-size: 0.72rem; }
++  #touch-edit output { font-size: 0.72rem; }
++  #touch-edit input[type="range"] { height: 1.5rem; }
++  #te-which { color: var(--exit); font-size: 0.72rem; min-height: 1.1em; }
++  #te-buttons { display: flex; gap: 0.4rem; margin-top: 0.15rem; }
++  #te-buttons .btn { flex: 1; padding: 0.42rem 0.5rem; font-size: 0.76rem; }
++
 +  /* ---- first run on a phone ---- */
 +  #touch-first { position: fixed; inset: 0; z-index: 33; pointer-events: none;
 +                 display: grid; align-content: start; justify-items: center;
@@ -960,13 +1715,11 @@
 +  #tf-card p { line-height: 1.5; }
 +  /* The editor panel is a corner tool normally. On the first run it is the
 +     screen, so it goes to the bottom where a thumb can already reach. */
-+  #touch-edit.first-run { top: auto; bottom: 1rem; left: 50%; transform: translateX(-50%);
-+                          width: min(24rem, 92vw); }
-+
++  #touch-edit.first-run { top: auto; bottom: 1rem; left: 50%; transform: translateX(-50%); }
+ 
    /* ---- turn the phone ---- */
    #rotate { position: fixed; inset: 0; z-index: 45; background: var(--void);
-             display: grid; place-content: center; justify-items: center; gap: 1rem;
-@@ -581,6 +606,21 @@
+@@ -581,27 +622,37 @@
  </div>
  <div id="touch" class="hidden"></div>
  
@@ -986,9 +1739,38 @@
 +</div>
 +
  <div id="touch-edit" class="hidden">
-   <h2>Move the controls</h2>
-   <p>Drag any button where you want it. Tap one to resize just that button.</p>
-@@ -629,6 +669,7 @@
+-  <h2>Move the controls</h2>
+-  <p>Drag any button where you want it. Tap one to resize just that button.</p>
+-  <div id="te-which">Nothing selected</div>
++  <!--
++    A drag handle, and then the only two things worth changing with a thumb on
++    a live screen: how big this button is, and how much of the room you can see
++    through it. Everything else moved to Settings, where there is room for it.
++  -->
++  <div id="te-grip"><span id="te-grip-dots">&#8942;&#8942;</span><span>Controls</span></div>
++  <div id="te-which">Tap a button</div>
+   <div class="field">
+-    <label for="te-size">This button</label><output id="te-size-value"></output>
++    <label for="te-size">Size</label><output id="te-size-value"></output>
+     <input type="range" id="te-size" min="40" max="150">
+   </div>
+   <div class="field">
+-    <label for="te-scale">Everything</label><output id="te-scale-value"></output>
+-    <input type="range" id="te-scale" min="60" max="180">
+-  </div>
+-  <div class="field">
+     <label for="te-opacity">See-through</label><output id="te-opacity-value"></output>
+     <input type="range" id="te-opacity" min="10" max="90">
+   </div>
+-  <div class="field">
+-    <label for="te-stick">Stick size</label><output id="te-stick-value"></output>
+-    <input type="range" id="te-stick" min="90" max="200">
+-  </div>
+-  <label class="check"><input type="checkbox" id="te-landscape">Force landscape in game</label>
+   <div id="te-buttons">
+     <button class="btn primary" id="te-done">Done</button>
+     <button class="btn quiet" id="te-reset">Reset</button>
+@@ -629,6 +680,7 @@
  <div id="roster-hud" class="hidden"></div>
  <div id="hud-timer" class="hidden">0:00</div>
  <button class="btn quiet hidden" id="fullscreen" title="Fullscreen">&#9974;</button>
@@ -996,7 +1778,16 @@
  <div id="power" class="hidden">
    <div id="power-line"><span id="power-name">Flare</span> · <span id="power-key">Q</span></div>
    <div id="power-track"><div id="power-fill"></div></div>
-@@ -807,7 +848,7 @@
+@@ -647,7 +699,7 @@
+ <div id="use" class="hidden"><b id="use-key">E</b> <span id="use-label"></span></div>
+ 
+ <div id="hiding" class="hidden">
+-  <span>You are inside. <b id="hiding-key">E</b> to come out.</span>
++  <span>You are inside. <span id="hiding-verb"></span><b id="hiding-key">E</b> to come out.</span>
+ </div>
+ 
+ <div id="tv" class="hidden"><div id="tv-body"></div></div>
+@@ -807,7 +859,7 @@
    <h1>Settings</h1>
    <div id="settings-tabs">
      <button data-tab="audio" class="active">Audio</button>
@@ -1005,7 +1796,7 @@
      <button data-tab="graphics">Graphics</button>
    </div>
  
-@@ -839,20 +880,44 @@
+@@ -839,20 +891,45 @@
      </p>
    </div>
  
@@ -1056,6 +1847,7 @@
 +      </div>
 +      <label class="check"><input type="checkbox" id="invert-y-touch">Swipe up to look down</label>
 +      <label class="check"><input type="checkbox" id="crouch-toggle-touch">Crouch stays down until you tap it again</label>
++      <label class="check"><input type="checkbox" id="te-landscape">Force landscape while playing</label>
 +      <button class="btn quiet" id="reset-touch">Put the buttons back where they started</button>
 +    </div>
 +

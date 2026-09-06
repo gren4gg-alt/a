@@ -17,10 +17,11 @@ import { loadSurfaceTextures } from './textures.js';
 import { loadModels } from './models.js';
 import { Interactables } from './interact.js';
 import { instance as modelInstance, fitInfo, has as hasModel, isPooled } from './models.js';
+import { MODEL_TINT } from './assets.js';
 import { startMinigame, GAME_NAMES } from './minigames.js';
 import { ceilingColliders, roomVariant } from './build.js';
 import { MenuScene } from './menuscene.js';
-import { TouchControls, isTouchDevice, lockLandscape, unlockOrientation, isPortrait } from './touch.js';
+import { TouchControls, isTouchDevice, lockLandscape, unlockOrientation, isPortrait, TOUCH_LABELS } from './touch.js';
 import { BoardEditor } from './boards.js';
 import { showRewarded, initAds, adsEnabled, menuCooldownLeft, markMenuAdWatched,
          providerIsVerified, providerName } from './ads.js';
@@ -59,7 +60,7 @@ const el = {
   prompt: $('prompt'), promptKeys: $('prompt-keys'), vignette: $('vignette'),
   ingameMenu: $('ingame-menu'),
   use: $('use'), useLabel: $('use-label'), useKey: $('use-key'),
-  hiding: $('hiding'), hidingKey: $('hiding-key'),
+  hiding: $('hiding'), hidingKey: $('hiding-key'), hidingVerb: $('hiding-verb'),
   door: $('door-status'), doorCount: $('door-count'),
   tv: $('tv'), tvBody: $('tv-body'),
   board: $('board'), boardBody: $('board-body'), boardRoom: $('board-room'),
@@ -146,7 +147,11 @@ function menuTick(now) {
     renderer.render(charRoom.scene, charRoom.camera);
     return;
   }
-  if (!menuScene || !DIORAMA.has(currentScreen)) return;
+  // touchReturnScreen means the editor has temporarily dropped us to
+  // currentScreen === null purely to expose the buttons. There is no house to
+  // look at from the menu, so keep the diorama up behind them.
+  const editingOverMenu = touchReturnScreen !== null && !run;
+  if (!menuScene || !(DIORAMA.has(currentScreen) || editingOverMenu)) return;
   menuScene.update(dt);
   menuScene.resize(window.innerWidth, window.innerHeight);
   renderer.render(menuScene.scene, menuScene.camera);
@@ -541,12 +546,12 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     // its own origin, so these two agree without an offset.
     obj.position.set(p.x, p.y ?? 0, p.z);
     obj.rotation.y = p.facing;
-    propMats.apply(obj);
+    propMats.apply(obj, { tint: MODEL_TINT[p.kind] ?? null });
     roomMeshes.get(p.room)?.add(obj);
     modelled++;
   }
 
-  const interact = new Interactables(scene, level);
+  const interact = new Interactables(scene, level, difficulty);
   const grid = new ColliderGrid([
     ...buildColliders(wallBoxes),
     ...propColliders(level.props),
@@ -707,10 +712,13 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
   el.carry.textContent = 'nothing';
   el.seed.textContent = `seed ${level.seed}`;
   el.powerName.textContent = loadout.char.ability;
-  el.powerKey.textContent = keyLabel(settings.data.binds.power);
-  el.reviveKey.textContent = keyLabel(settings.data.binds.interact);
-  el.useKey.textContent = keyLabel(settings.data.binds.interact);
-  el.hidingKey.textContent = keyLabel(settings.data.binds.interact);
+  el.powerKey.textContent = actionLabel('power');
+  el.reviveKey.textContent = actionLabel('interact');
+  el.useKey.textContent = actionLabel('interact');
+  el.hidingKey.textContent = actionLabel('interact');
+  // A key is pressed and a button is tapped, and the sentence has to read
+  // right either way.
+  el.hidingVerb.textContent = TOUCH ? 'Tap ' : '';
   el.doorCount.textContent = `0/${level.holders.length}`;
   el.promptKeys.innerHTML = promptText();
 
@@ -727,6 +735,19 @@ function finishBuild(difficulty, level, scene, material, wallBoxes, chunkMap, ro
     // After show(null), so the touch buttons are already on screen to drag.
     maybeFirstRunLayout();
   }, isNet() ? 200 : 450);
+}
+
+/**
+ * What to call an action in the HUD, for the device actually in their hands.
+ *
+ * On a keyboard this is the bind, which is what it always was. On a phone it
+ * is the caption printed on the on-screen button, because "E to pick someone
+ * up" on a device with no E is worse than no prompt at all — it reads like the
+ * game has not noticed what it is running on.
+ */
+function actionLabel(id) {
+  if (TOUCH) return TOUCH_LABELS[id] ?? '';
+  return keyLabel(settings.data.binds[id]);
 }
 
 function promptText() {
@@ -1018,6 +1039,7 @@ function closeBoard() {
   run.boardEditor = null;
   el.boardBody.innerHTML = '';
   el.board.classList.add('hidden');
+  relockPointer();   // same reason as the terminal
 }
 
 // -- terminals -------------------------------------------------------------
@@ -1046,6 +1068,26 @@ function closeTerminal() {
   run.minigame = null;
   el.tv.classList.add('hidden');
   setTerminalBusy(id, false);
+  // Opening the terminal let the mouse go so it could click the puzzle.
+  // Closing it has to take the mouse back, or you finish a screen and land in
+  // the room looking at the click-to-look overlay as though you had paused.
+  relockPointer();
+}
+
+/**
+ * Ask for the pointer back, if there is anything to point at.
+ *
+ * Browsers only grant this inside a user gesture, which is why every caller is
+ * on the tail of a click. A refusal is fine and expected — the click-anywhere
+ * handler further down is the fallback — so the rejection is swallowed rather
+ * than reported.
+ */
+function relockPointer() {
+  if (TOUCH || !run || run.over) return;
+  if (currentScreen !== null || document.pointerLockElement) return;
+  if (run.minigame || run.boardOpen || run.player.downed) return;
+  const r = canvas.requestPointerLock();
+  if (r && typeof r.catch === 'function') r.catch(() => {});
 }
 
 function setTerminalBusy(id, on) {
@@ -1193,7 +1235,7 @@ function applyDownLocal() {
   refreshAdRevive();
   const canSelfRevive = run.loadout.char.id === 'nurse' && run.loadout.ready;
   el.downedNote.textContent = canSelfRevive
-    ? `You can still get yourself up. ${keyLabel(settings.data.binds.power)}.`
+    ? `You can still get yourself up. ${actionLabel('power')}.`
     : isNet() ? 'Someone has to come and pick you up.'
               : 'No one is coming for you. Alone, this is how it ends.';
 }
@@ -2284,7 +2326,7 @@ function renderSelect() {
   el.charPassive.textContent = chosen.passive;
   el.charAbility.textContent = chosen.ability;
   el.charAbilityText.textContent = chosen.abilityText;
-  el.charKey.textContent = keyLabel(settings.data.binds.power) +
+  el.charKey.textContent = actionLabel('power') +
     (chosen.cooldown ? ` · ${chosen.cooldown}s cooldown` : ' · once per run');
 
   el.charList.innerHTML = '';
@@ -2705,10 +2747,23 @@ if (TOUCH) {
 // True while the editor is standing in for a screen rather than sitting on top
 // of one, i.e. the walkthrough the first house on a phone opens with.
 let touchFirstRun = false;
+// Which screen to put back when the editor closes, or null if we were already
+// looking at the world.
+let touchReturnScreen = null;
 
 function openTouchEditor({ firstRun = false } = {}) {
   if (!TOUCH) return;
   touchFirstRun = firstRun;
+
+  // Get out of the way of the thing being edited.
+  //
+  // The on-screen buttons live at z-index 14 and every settings screen is at
+  // 30, so opening this from Settings put the panel in front of buttons that
+  // were themselves behind an opaque screen — you could see the sliders and
+  // nothing to point them at. Drop to the world (or the menu backdrop), and
+  // put the screen back on the way out.
+  touchReturnScreen = currentScreen;
+  if (currentScreen !== null) show(null);
   touchControls = touchControls ?? new TouchControls($('touch'));
   touchControls.applyLayout();
   touchControls.setEditMode(true);
@@ -2719,6 +2774,12 @@ function openTouchEditor({ firstRun = false } = {}) {
   };
   $('touch').classList.remove('hidden');
   el.touchEdit.classList.remove('hidden');
+  // Clear anything a previous drag left behind, so the panel always opens
+  // somewhere sensible rather than wherever it was last shoved.
+  el.touchEdit.style.left = '';
+  el.touchEdit.style.top = '';
+  el.touchEdit.style.bottom = '';
+  el.touchEdit.style.transform = '';
   el.touchEdit.classList.toggle('first-run', firstRun);
   el.touchFirst.classList.toggle('hidden', !firstRun);
   el.teDone.textContent = firstRun ? 'Save and play' : 'Done';
@@ -2745,6 +2806,11 @@ function closeTouchEditor() {
   el.touchEdit.classList.remove('first-run');
   el.touchFirst.classList.add('hidden');
   el.teDone.textContent = 'Done';
+  // Back to wherever we came from. show() re-toggles the touch layer, the HUD
+  // and the corner buttons for us, so this has to come before we read them.
+  if (touchReturnScreen !== null) show(touchReturnScreen);
+  touchReturnScreen = null;
+
   $('touch').classList.toggle('hidden', !(TOUCH && currentScreen === null));
   const playing = currentScreen === null && run && !run.over;
   el.ingameMenu.classList.toggle('hidden', !playing);
@@ -2781,16 +2847,12 @@ function maybeFirstRunLayout() {
 
 function syncTouchSliders() {
   const t = settings.data.touch;
-  $('te-scale').value = String(Math.round(t.scale * 100));
-  $('te-scale-value').textContent = `${$('te-scale').value}%`;
   $('te-opacity').value = String(Math.round(t.opacity * 100));
   $('te-opacity-value').textContent = `${$('te-opacity').value}%`;
-  $('te-stick').value = String(t.stickSize);
-  $('te-stick-value').textContent = `${t.stickSize}px`;
   $('te-landscape').checked = !!t.lockLandscape;
   const sel = touchControls?.selected;
   $('te-size').value = String(sel ? t.layout[sel].size : 70);
-  $('te-size-value').textContent = `${$('te-size').value}px`;
+  $('te-size-value').textContent = sel ? `${$('te-size').value}px` : '—';
 }
 
 $('te-size').addEventListener('input', (e) => {
@@ -2800,19 +2862,9 @@ $('te-size').addEventListener('input', (e) => {
   $('te-size-value').textContent = `${e.target.value}px`;
   touchControls.applyLayout();
 });
-$('te-scale').addEventListener('input', (e) => {
-  settings.data.touch.scale = Number(e.target.value) / 100;
-  $('te-scale-value').textContent = `${e.target.value}%`;
-  touchControls?.applyLayout();
-});
 $('te-opacity').addEventListener('input', (e) => {
   settings.data.touch.opacity = Number(e.target.value) / 100;
   $('te-opacity-value').textContent = `${e.target.value}%`;
-  touchControls?.applyLayout();
-});
-$('te-stick').addEventListener('input', (e) => {
-  settings.data.touch.stickSize = Number(e.target.value);
-  $('te-stick-value').textContent = `${e.target.value}px`;
   touchControls?.applyLayout();
 });
 $('te-landscape').addEventListener('change', (e) => {
@@ -2825,6 +2877,57 @@ $('te-reset').addEventListener('click', () => {
   touchControls?.applyLayout();
   syncTouchSliders();
 });
+
+// ---------------------------------------------------------------------------
+// Dragging the editor panel itself.
+//
+// It covers the buttons it is there to arrange — unavoidable on a phone-sized
+// screen — so the answer is to let it be shoved out of the way rather than to
+// guess a corner that is always free. Pointer events, so a mouse and a thumb
+// take the same path, and clamped to the viewport so it can never be parked
+// somewhere it cannot be dragged back from.
+// ---------------------------------------------------------------------------
+
+(() => {
+  const panel = el.touchEdit;
+  const grip = $('te-grip');
+  let drag = null;
+
+  grip.addEventListener('pointerdown', (e) => {
+    const r = panel.getBoundingClientRect();
+    drag = { id: e.pointerId, dx: e.clientX - r.left, dy: e.clientY - r.top };
+    grip.setPointerCapture?.(e.pointerId);
+    grip.classList.add('dragging');
+    // The first-run variant is centred with a transform. Once it is being
+    // dragged it is positioned outright, or the transform fights every move.
+    panel.classList.remove('first-run');
+    panel.style.transform = 'none';
+    panel.style.left = `${r.left}px`;
+    panel.style.top = `${r.top}px`;
+    panel.style.bottom = 'auto';
+    e.preventDefault();
+  });
+
+  grip.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const r = panel.getBoundingClientRect();
+    // Keep the grip itself reachable: at least a strip of the panel stays on
+    // screen on every side.
+    const maxX = window.innerWidth - 44;
+    const maxY = window.innerHeight - 30;
+    panel.style.left = `${Math.min(maxX, Math.max(44 - r.width, e.clientX - drag.dx))}px`;
+    panel.style.top = `${Math.min(maxY, Math.max(0, e.clientY - drag.dy))}px`;
+  });
+
+  const endDrag = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    drag = null;
+    grip.classList.remove('dragging');
+  };
+  grip.addEventListener('pointerup', endDrag);
+  grip.addEventListener('pointercancel', endDrag);
+})();
+
 $('open-touch-edit').addEventListener('click', openTouchEditor);
 $('open-touch-edit').classList.toggle('hidden', !TOUCH);
 

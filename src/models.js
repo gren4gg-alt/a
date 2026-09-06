@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
-import { MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS } from './assets.js';
+import { MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS, PROP_SIZE } from './assets.js';
 
 // ---------------------------------------------------------------------------
 // Models.
@@ -207,15 +207,22 @@ export function fitInfo(slot, w, h, d) {
 
   const base = h / s.y;
   const lo = base / MAX_STRETCH, hi = base * MAX_STRETCH;
-  const kx = Math.min(hi, Math.max(lo, w / s.x));
-  const kz = Math.min(hi, Math.max(lo, d / s.z));
+  let kx = Math.min(hi, Math.max(lo, w / s.x));
+  let ky = base;
+  let kz = Math.min(hi, Math.max(lo, d / s.z));
+
+  // Your dial (assets.js). Applied last and to all three axes together, so it
+  // never changes the shape — only how big the thing is. The caller rebuilds
+  // the collider from what comes out, so this cannot desync the hitbox.
+  const nudge = PROP_SIZE?.[slot] ?? 1;
+  if (nudge > 0 && nudge !== 1) { kx *= nudge; ky *= nudge; kz *= nudge; }
 
   return {
     // Per axis. Callers do obj.scale.set(scale.x, scale.y, scale.z).
-    scale: { x: kx, y: base, z: kz },
+    scale: { x: kx, y: ky, z: kz },
     // The uniform equivalent, for anything that still wants one number.
-    k: base,
-    w: s.x * kx, h: s.y * base, d: s.z * kz,
+    k: ky,
+    w: s.x * kx, h: s.y * ky, d: s.z * kz,
   };
 }
 
