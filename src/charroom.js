@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { buildFigure } from './preview.js';
 import { characterModel } from './models.js';
+import { CharacterAnimator } from './animation.js';
 
 // ---------------------------------------------------------------------------
 // The character room.
@@ -37,6 +38,7 @@ export class CharacterRoom {
     this.dragging = false;
     this.lastX = 0;
     this.offsetX = 1.15;
+    this.animator = null;
 
     this.figure = new THREE.Group();
     this.scene.add(this.figure);
@@ -109,12 +111,27 @@ export class CharacterRoom {
   }
 
   show(character) {
+    this.animator?.dispose();
+    this.animator = null;
     this.figure.clear();
     // Their own model if you supplied one, the generic body if not, and the
     // built-in silhouette if neither.
     const model = characterModel(character.id);
     this.figure.add(model ?? buildFigure(character));
     this.character = character;
+
+    // Breathing, in the shop. A body standing in a T-pose reads as a broken
+    // asset however good it is, and idle is the one clip anybody has on day
+    // one — so this is the screen where having wired animation shows first.
+    if (model) {
+      const animator = new CharacterAnimator(model);
+      if (animator.usable) {
+        animator.play('idle');
+        this.animator = animator;
+      } else {
+        animator.dispose();
+      }
+    }
 
     // Tint the lamp towards the character, so each one owns the room a little.
     this.lamp.color.setHex(character.color).lerp(new THREE.Color(0xffb066), 0.55);
@@ -160,6 +177,7 @@ export class CharacterRoom {
   update(dt) {
     this.time += dt;
     const t = this.time;
+    this.animator?.update(dt);
 
     if (this.spin && !this.dragging) this.yaw += dt * 0.18;
     this.figure.rotation.y = this.yaw;
@@ -210,6 +228,8 @@ export class CharacterRoom {
   }
 
   dispose() {
+    this.animator?.dispose();
+    this.animator = null;
     this.scene.traverse((o) => {
       if (o.isMesh || o.isPoints) { o.geometry?.dispose(); o.material?.dispose(); }
     });

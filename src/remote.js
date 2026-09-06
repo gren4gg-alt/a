@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { createGlowMaterial } from './material.js';
 import { characterModel } from './models.js';
+import { CharacterAnimator, stateFor } from './animation.js';
 
 // ---------------------------------------------------------------------------
 // Remote players.
@@ -62,6 +63,11 @@ export class RemotePlayer {
     this.mesh.renderOrder = 1;
     scene.add(this.mesh);
 
+    // Only a real model can be animated. The capsule fallback keeps the squash
+    // and the tip-over below, which is why those are still here.
+    this.animator = this.usesModel ? new CharacterAnimator(model) : null;
+    if (!this.animator?.usable) this.animator = null;
+
     // A small marker that stays visible through walls, so you can find each
     // other in a maze without shouting coordinates.
     const beadGeo = new THREE.SphereGeometry(0.09, 8, 6);
@@ -78,7 +84,11 @@ export class RemotePlayer {
     while (this.buffer.length > 2 && this.buffer[0].t < cutoff) this.buffer.shift();
   }
 
-  update(now) {
+  /**
+   * @param dt seconds since the last frame, for the animation mixer. Zero is
+   *   safe and simply leaves the pose where it is.
+   */
+  update(now, dt = 0) {
     const target = now - INTERP_DELAY;
     const buf = this.buffer;
     if (!buf.length) return;
@@ -106,7 +116,6 @@ export class RemotePlayer {
 
     // Derived velocity: the ghost's hearing check needs it on the host, and it
     // is cheaper to infer than to put another field in every snapshot.
-    const dt = 1 / 60;
     this.vel.set((this.pos.x - prevX) / dt, 0, (this.pos.z - prevZ) / dt);
 
     this.crouching = b.crouching;
@@ -114,17 +123,35 @@ export class RemotePlayer {
     const stowed = !!this.hidingClosetId;
     this.mesh.visible = !this.dead && !stowed;
     this.bead.visible = !this.dead && !stowed;
-    // Squash rather than swap geometry: at the distance you ever see another
-    // player in here, the silhouette is all the information that survives.
-    const squash = this.crouching ? 0.52 : 1;
-    this.mesh.scale.set(1, squash, 1);
-    this.mesh.position.set(this.pos.x, this.downed ? -0.55 : 0, this.pos.z);
-    this.mesh.rotation.set(this.downed ? Math.PI / 2.3 : 0, this.yaw, 0);
+
+    if (this.animator) {
+      // The speed comes from the interpolated position, which is the same
+      // number the ghost's hearing uses — so what you see somebody doing is
+      // what the house thinks they are doing.
+      const speed = Math.hypot(this.vel.x, this.vel.z);
+      this.animator.play(stateFor({
+        speed, crouching: this.crouching, downed: this.downed,
+      }), speed);
+      this.animator.update(dt);
+      // The clip is doing the crouching and the falling over, so the old
+      // stand-ins must not fight it.
+      this.mesh.scale.set(1, 1, 1);
+      this.mesh.position.set(this.pos.x, 0, this.pos.z);
+      this.mesh.rotation.set(0, this.yaw, 0);
+    } else {
+      // Squash rather than swap geometry: at the distance you ever see another
+      // player in here, the silhouette is all the information that survives.
+      const squash = this.crouching ? 0.52 : 1;
+      this.mesh.scale.set(1, squash, 1);
+      this.mesh.position.set(this.pos.x, this.downed ? -0.55 : 0, this.pos.z);
+      this.mesh.rotation.set(this.downed ? Math.PI / 2.3 : 0, this.yaw, 0);
+    }
     this.bead.position.set(this.pos.x, this.downed ? 0.35 : (this.crouching ? 1.15 : 2.05), this.pos.z);
     if (!this.usesModel) this.material.uniforms.uGain.value = this.downed ? 0.35 : 0.9;
   }
 
   dispose(scene) {
+    this.animator?.dispose();
     scene.remove(this.mesh);
     scene.remove(this.bead);
     this.mesh.geometry?.dispose();

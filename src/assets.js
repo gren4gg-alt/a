@@ -144,6 +144,85 @@ export const PROP_SIZE = {
 };
 
 // ---------------------------------------------------------------------------
+// Animations.
+//
+// Built for the Mixamo workflow and nothing else, because that is what is
+// being used and a general retargeter would be ten times the code.
+//
+// HOW TO ADD ONE:
+//   1. On mixamo.com pick any animation. Tick IN PLACE if the option is there
+//      (the game moves the character itself; a clip that also walks forward
+//      fights it and you get skating).
+//   2. Download as FBX, then in Blender: File > Import > FBX, then File >
+//      Export > glTF 2.0 (.glb). Or use any FBX-to-GLB converter.
+//   3. Drop it in assets/animations/ and put its filename below.
+//
+// It does not matter WHICH Mixamo character you downloaded the animation on.
+// Every Mixamo rig has the same bone names, and the clip is retargeted onto
+// whichever character is wearing it, including scaling the hip motion for a
+// taller or shorter body. Download everything on the default Y-Bot and it will
+// work on all of them.
+//
+// Every entry is optional. A missing state falls back to a sensible neighbour
+// (see ANIMATION_FALLBACK), and a character with no animations at all just
+// stands there exactly as before.
+// ---------------------------------------------------------------------------
+
+export const ANIMATION_ASSETS = {
+  idle:        'assets/animations/idle.glb',
+  walk:        'assets/animations/walk.glb',
+  run:         'assets/animations/run.glb',
+  crouchIdle:  'assets/animations/crouch-idle.glb',
+  crouchWalk:  'assets/animations/crouch-walk.glb',
+  // Played once and held on the last frame, not looped.
+  downed:      'assets/animations/downed.glb',
+};
+
+/** Set false to ignore assets/animations entirely. */
+export const USE_ASSET_ANIMATIONS = true;
+
+/** States that play once and hold their last frame instead of looping. */
+export const ANIMATION_ONCE = ['downed'];
+
+/**
+ * What to use when a state has no clip of its own. Followed in order until
+ * something exists, so you can ship with only idle.glb and walk.glb and add
+ * the rest whenever.
+ */
+export const ANIMATION_FALLBACK = {
+  walk:       ['idle'],
+  run:        ['walk', 'idle'],
+  crouchIdle: ['idle'],
+  crouchWalk: ['crouchIdle', 'walk', 'idle'],
+  downed:     [],
+};
+
+/**
+ * The numbers to nudge when it looks wrong. All of them are about matching
+ * playback to the speed the game is actually moving somebody at.
+ */
+export const ANIMATION_TUNING = {
+  // Ground speed, in metres per second, that each clip looks correct at. If
+  // feet skate forwards the clip is too slow, so LOWER the number; if they
+  // scrabble, raise it. Mixamo's own walk is around 1.5 and its run around 4.
+  walkSpeed: 1.5,
+  runSpeed: 4.0,
+  crouchWalkSpeed: 1.1,
+
+  // How far playback may be stretched to match. Outside this it is clamped,
+  // because a walk played at three times speed reads as a glitch.
+  rateRange: [0.55, 1.8],
+
+  // Below this many m/s somebody counts as standing still, above runAbove
+  // they count as running.
+  moveAbove: 0.35,
+  runAbove: 2.6,
+
+  // Seconds to blend between two states.
+  fade: 0.18,
+};
+
+// ---------------------------------------------------------------------------
 // Colour for models that arrive with none.
 //
 // glTF carries a base colour and image textures, and nothing else. A material

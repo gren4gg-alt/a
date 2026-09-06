@@ -16,7 +16,7 @@ import { Ghost } from './enemy.js';
 import { loadSurfaceTextures } from './textures.js';
 import { loadModels } from './models.js';
 import { Interactables } from './interact.js';
-import { instance as modelInstance, fitInfo, has as hasModel, isPooled } from './models.js';
+import { instance as modelInstance, fitInfo, has as hasModel, isPooled, loadAnimations } from './models.js';
 import { MODEL_TINT } from './assets.js';
 import { startMinigame, GAME_NAMES } from './minigames.js';
 import { ceilingColliders, roomVariant } from './build.js';
@@ -178,6 +178,12 @@ async function ensureMenuScene() {
   if (menuScene) return;
   menuScene = new MenuScene(surfaces, renderer.capabilities.getMaxAnisotropy());
   menuScene.resize(window.innerWidth, window.innerHeight);
+  // Models and clips arrive with the textures. Somebody who reached the shop
+  // before that finished is looking at a built-in silhouette standing still;
+  // rebuild it now that there is something better to show.
+  if (CHAR_SCREENS.has(currentScreen) && charRoom?.character) {
+    charRoom.show(charRoom.character);
+  }
 }
 
 /**
@@ -384,6 +390,9 @@ function ensureSurfaces() {
       // Models are optional; every slot falls back to a primitive, so a
       // failure here is not worth blocking the house on.
       loadModels().catch(() => ({ loaded: [], missing: [] })),
+      // Same again for the clips: nothing here is required, and a character
+      // with no animation stands still exactly as it did before.
+      loadAnimations().catch(() => ({ loaded: [], missing: [] })),
     ]).then(([surfaces]) => surfaces);
   }
   return surfacesPromise;
@@ -1577,7 +1586,7 @@ function step(now) {
     g.mesh.visible = dx * dx + dz * dz < far2;
   }
 
-  for (const r of run.remotes.values()) r.update(now);
+  for (const r of run.remotes.values()) r.update(now, dt);
   if (!isHost()) for (const g of run.ghosts) g.updateVisualsOnly(dt, run.grid, run.time);
   if (!run.over && run.begun) simulate(dt);
   if (isNet()) network(dt);

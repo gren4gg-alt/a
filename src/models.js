@@ -2,7 +2,10 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
-import { MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS, PROP_SIZE } from './assets.js';
+import {
+  MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS, PROP_SIZE,
+  ANIMATION_ASSETS, USE_ASSET_ANIMATIONS,
+} from './assets.js';
 
 // ---------------------------------------------------------------------------
 // Models.
@@ -283,6 +286,76 @@ export function instanceInBox(slot, w, h, d) {
 }
 
 export function animationsFor(slot) { return cache.get(slot)?.animations ?? []; }
+
+// ---------------------------------------------------------------------------
+// Animation clips.
+//
+// Loaded from their own files rather than out of the character models, so one
+// walk.glb animates the whole cast. See the note in assets.js: every Mixamo
+// rig shares its bone names, which is what makes that work.
+//
+// Only the raw clip is stored here plus the hip height of the body it was
+// downloaded on. Fitting it to a particular character is animation.js's job
+// and happens per instance, because the answer differs per character.
+// ---------------------------------------------------------------------------
+
+const clips = new Map();
+
+/** @returns {{clip: THREE.AnimationClip, hipsY: number}|null} */
+export function animationSource(state) {
+  return clips.get(state) ?? null;
+}
+
+export function animationStates() {
+  return [...clips.keys()];
+}
+
+/**
+ * Rest height of the hips in a loaded animation file, which is the yardstick
+ * the retargeter scales hip motion against.
+ *
+ * Duplicated from animation.js rather than imported, to keep models.js free of
+ * a dependency on it — this file is loaded by things that never animate.
+ */
+function sourceHipsHeight(scene) {
+  let bone = null;
+  scene.updateMatrixWorld(true);
+  scene.traverse((o) => {
+    if (bone) return;
+    const n = String(o.name).toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (n.replace(/mixamorig\d*/g, '') === 'hips') bone = o;
+  });
+  if (!bone) return 0;
+  return new THREE.Vector3().setFromMatrixPosition(bone.matrixWorld).y;
+}
+
+/** Resolves once every configured animation has either loaded or failed. */
+export async function loadAnimations() {
+  if (!USE_ASSET_ANIMATIONS) return { loaded: [], missing: Object.keys(ANIMATION_ASSETS) };
+  const entries = Object.entries(ANIMATION_ASSETS).filter(([, url]) => url);
+  const loaded = [], missing = [];
+
+  await Promise.all(entries.map(async ([state, url]) => {
+    try {
+      const gltf = await loadOne(url);
+      // A Mixamo export carries exactly one clip, usually called
+      // "mixamo.com". Anything with several is somebody's own combined file,
+      // and the first is still the reasonable guess.
+      const clip = gltf.animations?.[0];
+      if (!clip) throw new Error('no clip');
+      const scene = gltf.scene ?? gltf.scenes?.[0];
+      clips.set(state, {
+        clip,
+        hipsY: scene ? sourceHipsHeight(scene) : 0,
+      });
+      loaded.push(state);
+    } catch {
+      missing.push(state);
+    }
+  }));
+
+  return { loaded, missing };
+}
 
 /** Resolves once every configured model has either loaded or failed. */
 export async function loadModels(onProgress) {
