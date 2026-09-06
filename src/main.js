@@ -144,7 +144,10 @@ function menuTick(now) {
   if (crashed) return;
 
   if (CHAR_SCREENS.has(currentScreen) && charRoom) {
-    charRoom.resize(window.innerWidth, window.innerHeight);
+    // Each screen reserves its own column for the figure, so hand the room the
+    // one that belongs to whichever screen is up rather than assuming a layout.
+    const slotEl = currentScreen === 'shop' ? $('shop-preview-wrap') : $('preview-wrap');
+    charRoom.resize(window.innerWidth, window.innerHeight, slotEl);
     charRoom.update(dt);
     renderer.render(charRoom.scene, charRoom.camera);
     return;

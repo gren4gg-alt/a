@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { MODEL_ASSETS, USE_ASSET_MODELS, STRIP_MODEL_OBJECTS, PROP_SIZE } from './assets.js';
 
 // ---------------------------------------------------------------------------
@@ -67,13 +68,37 @@ function loadOne(url) {
  *
  * @returns {{root: THREE.Group, size: THREE.Vector3}} size is post-fit, in metres
  */
+/**
+ * Bounds of a model, correct for rigged ones too.
+ *
+ * A SkinnedMesh is not where its geometry says it is. The vertices in the
+ * buffer are in bind space and the skeleton is what puts them somewhere, so
+ * measuring the raw geometry gives a box in the wrong place and often the
+ * wrong size. three knows how to do this properly — SkinnedMesh has its own
+ * computeBoundingBox that walks every vertex through applyBoneTransform — but
+ * it needs the bone world matrices to be current, and straight out of the
+ * loader they are not. Without the two lines below, a Mixamo character
+ * measures against a box that has nothing to do with the body, which is why
+ * one came out standing several metres to the side of where it was put and
+ * swung around the room instead of turning on the spot.
+ */
+function measure(object) {
+  object.updateMatrixWorld(true);
+  object.traverse((o) => {
+    if (!o.isSkinnedMesh) return;
+    o.skeleton?.update?.();
+    o.boundingBox = null;      // cached; must be dropped or the second pass is stale
+  });
+  return new THREE.Box3().setFromObject(object);
+}
+
 function fit(object, targetHeight) {
-  const box = new THREE.Box3().setFromObject(object);
+  const box = measure(object);
   const size = new THREE.Vector3();
   box.getSize(size);
   if (size.y > 1e-4 && targetHeight) {
     object.scale.multiplyScalar(targetHeight / size.y);
-    box.setFromObject(object);
+    box.copy(measure(object));
     box.getSize(size);
   }
   const centre = new THREE.Vector3();
@@ -116,10 +141,30 @@ export function isPooled(object) {
  * @returns {THREE.Object3D|null} a fresh clone, or null if the slot has no
  *   model and the caller should build its primitive instead.
  */
+/**
+ * Clone a cached model.
+ *
+ * Object3D.clone() is wrong for anything rigged, and wrong in a way that looks
+ * like the model simply failed to load. It copies the SkinnedMesh but leaves
+ * the copy's skeleton POINTING AT THE ORIGINAL'S BONES — so every clone
+ * deforms to whatever pose that first skeleton happens to be in, wherever it
+ * happens to be. In practice: the character room builds one, its bones live in
+ * the character room's scene, and every teammate cloned afterwards has their
+ * vertices dragged off to that skeleton's coordinates. They are not invisible,
+ * they are somewhere else, which is why all you could see was the marker bead
+ * that had been positioned honestly.
+ *
+ * SkeletonUtils.clone rebuilds the bone hierarchy and rebinds to it. It costs
+ * more than a plain clone, so it is only used where it is needed.
+ */
+function copyOf(entry) {
+  return entry.skinned ? cloneSkinned(entry.root) : entry.root.clone(true);
+}
+
 export function instance(slot) {
   const entry = cache.get(slot);
   if (!entry) return null;
-  const copy = entry.root.clone(true);
+  const copy = copyOf(entry);
   copy.animations = entry.animations;
   return pool(copy);
 }
@@ -154,7 +199,7 @@ export function has(slot) { return cache.has(slot); }
 export function instanceScaled(slot, height) {
   const entry = cache.get(slot);
   if (!entry) return null;
-  const copy = entry.root.clone(true);
+  const copy = copyOf(entry);
   if (entry.size.y > 1e-4 && height) copy.scale.setScalar(height / entry.size.y);
   return pool(copy);
 }
@@ -232,7 +277,7 @@ export function instanceInBox(slot, w, h, d) {
   const s = entry.size;
   if (s.x < 1e-4 || s.y < 1e-4 || s.z < 1e-4) return null;
   const k = Math.min(w / s.x, h / s.y, d / s.z);
-  const copy = entry.root.clone(true);
+  const copy = copyOf(entry);
   copy.scale.setScalar(k);
   return { object: pool(copy), w: s.x * k, h: s.y * k, d: s.z * k };
 }
@@ -255,10 +300,18 @@ export async function loadModels(onProgress) {
       if (stripped) {
         console.info(`[models] ${slot}: dropped ${stripped} label object(s) from ${spec.url}`);
       }
-      scene.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
+      let skinned = false;
+      scene.traverse((o) => {
+        if (o.isMesh) o.frustumCulled = false;
+        // A rigged mesh must never be culled by its own bounds either: those
+        // bounds are the bind pose, and an animated arm reaching outside them
+        // makes the whole body vanish at the edge of the screen.
+        if (o.isSkinnedMesh) { o.frustumCulled = false; skinned = true; }
+      });
       const fitted = fit(scene, spec.height);
       cache.set(slot, {
-        root: fitted.root, size: fitted.size, animations: gltf.animations ?? [],
+        root: fitted.root, size: fitted.size, skinned,
+        animations: gltf.animations ?? [],
       });
       loaded.push(slot);
     } catch {

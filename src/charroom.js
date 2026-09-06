@@ -18,6 +18,10 @@ import { characterModel } from './models.js';
 // baked pipeline has nothing to offer at that size.
 // ---------------------------------------------------------------------------
 
+// How far back the camera stands. Referenced by resize(), which has to know it
+// to work out how wide the frame is at the figure's depth.
+const CAM_Z = 3.15;
+
 const ROOM_W = 7.0;
 const ROOM_D = 6.5;
 const ROOM_H = 3.2;
@@ -118,13 +122,39 @@ export class CharacterRoom {
   }
 
   /**
-   * The list sits on the left on a wide screen, so the figure stands right of
-   * centre. On a narrow one the list is full width, so it goes back to middle.
+   * Stand the figure where the page has left room for it.
+   *
+   * This used to be a flat 1.15 metres right of centre on any screen wider
+   * than 900px, which was right for exactly one layout. The shop and the
+   * character select reserve different columns, and at 1800px wide the figure
+   * ended up standing behind the list on one of them. So rather than a magic
+   * number: take the element the page has set aside for the preview, work out
+   * where the middle of it falls on screen, and put the figure there.
+   *
+   * @param target the element the figure should stand in front of, or null to
+   *   fall back to the old centred behaviour on a narrow screen
    */
-  resize(w, h) {
+  resize(w, h, target = null) {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this.offsetX = w > 900 ? 1.15 : 0;
+
+    const rect = target?.getBoundingClientRect?.();
+    if (!rect || rect.width < 1 || w <= 900) {
+      this.offsetX = w > 900 ? 1.15 : 0;
+      return;
+    }
+
+    // Half the world the camera can see at the depth the figure stands at.
+    const halfH = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2) * CAM_Z;
+    const halfW = halfH * this.camera.aspect;
+
+    // Where the middle of that column sits, as -1 (left edge) to +1 (right).
+    const frac = ((rect.left + rect.width / 2) - w / 2) / (w / 2);
+
+    // The camera slides with the figure at 0.45 of its offset, so only the
+    // remaining 0.55 actually moves it across the frame. Dividing that out is
+    // what makes the figure land on the column rather than short of it.
+    this.offsetX = THREE.MathUtils.clamp((frac * halfW) / 0.55, -2.6, 2.6);
   }
 
   update(dt) {
@@ -139,7 +169,7 @@ export class CharacterRoom {
     this.camera.position.set(
       this.offsetX * 0.45 + Math.sin(t * 0.12) * 0.16,
       1.42 + Math.sin(t * 0.17) * 0.05,
-      3.15,
+      CAM_Z,
     );
     this.camera.lookAt(this.offsetX, 1.02, 0);
 
